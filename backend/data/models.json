@@ -1,0 +1,48 @@
+{
+  "default_model": "z-ai/glm-5.3-flash",
+  "default_thinking": "high",
+  "thinking_levels": [
+    "none",
+    "low",
+    "medium",
+    "high",
+    "max"
+  ],
+  "models": [
+    {
+      "id": "z-ai/glm-5.3-flash",
+      "name": "GLM 5.3 Flash (Default)",
+      "description": "Fast reasoning flagship with deep thinking capabilities",
+      "supports_thinking": true,
+      "is_default": true
+    },
+    {
+      "id": "meta/muse-spark-1.3-contributor",
+      "name": "Muse Spark 1.3 Contributor",
+      "description": "Meta Muse specialized vision-prompt synthesis",
+      "supports_thinking": true,
+      "is_default": false
+    },
+    {
+      "id": "deepseek-ai/DeepSeek-R1-0528",
+      "name": "DeepSeek R1",
+      "description": "State-of-the-art open reasoning model",
+      "supports_thinking": true,
+      "is_default": false
+    },
+    {
+      "id": "qwen/qwen3.8-27b:thinking",
+      "name": "Qwen 3.8 27B Thinking",
+      "description": "Dense reasoning model fine-tuned for structured prompts",
+      "supports_thinking": true,
+      "is_default": false
+    },
+    {
+      "id": "meta/muse-glimmer-30b",
+      "name": "Meta Muse Glimmer 30B",
+      "description": "Large parameter prompt & creative vision architect",
+      "supports_thinking": false,
+      "is_default": false
+    }
+  ]
+}

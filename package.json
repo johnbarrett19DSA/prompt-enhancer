@@ -1,0 +1,11 @@
+{
+  "name": "promptforge",
+  "version": "1.0.0",
+  "description": "PromptForge Full-Stack Minimal - AI Image Prompt Architect",
+  "scripts": {
+    "build": "cd frontend && npm run build",
+    "dev:backend": "cd backend && venv/bin/uvicorn app.main:app --reload --port 8000",
+    "dev:frontend": "cd frontend && npm run dev",
+    "start": "bash start.sh"
+  }
+}

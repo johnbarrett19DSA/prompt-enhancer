@@ -92,7 +92,7 @@ export async function updateModelSettings(settings: { default_model?: string; de
 export async function streamChat(
   sessionId: string,
   payload: { message: string; model?: string; thinking?: string },
-  onChunk: (event: { type: string; delta?: string; id?: string; content?: string; error?: string }) => void,
+  onChunk: (event: { type: string; delta?: string; id?: string; content?: string; thinking?: string; error?: string }) => void,
   signal?: AbortSignal
 ): Promise<void> {
   const res = await fetch(`${API_BASE}/sessions/${sessionId}/chat`, {

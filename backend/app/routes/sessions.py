@@ -193,26 +193,72 @@ async def update_session(session_id: str, payload: UpdateSessionRequest):
         "updated_at": row["updated_at"]
     }
 
+def clean_prompt_and_thinking(content: str, thinking: str = "") -> tuple[str, str]:
+    """
+    Extracts any inline thinking/thought tags (<think>...</think>, <thought>...</thought>),
+    strips enclosing markdown code blocks (e.g. ```markdown ... ``` or ```text ... ```),
+    and returns (cleaned_prompt, combined_thinking).
+    """
+    if not content:
+        return "", thinking or ""
+
+    cleaned = content.strip()
+    extracted_thoughts: List[str] = []
+
+    def replace_think(m: re.Match) -> str:
+        th = m.group(1).strip()
+        if th:
+            extracted_thoughts.append(th)
+        return ""
+
+    # Extract closed <think>...</think> or <thought>...</thought> tags
+    cleaned = re.sub(r"<(?:think|thought)>([\s\S]*?)<\/(?:think|thought)>", replace_think, cleaned, flags=re.IGNORECASE).strip()
+
+    # If there is an unclosed <think> or <thought> tag at the end (e.g. truncated)
+    if re.search(r"<(?:think|thought)>", cleaned, re.IGNORECASE):
+        unclosed_match = re.search(r"<(?:think|thought)>([\s\S]*)$", cleaned, re.IGNORECASE)
+        if unclosed_match:
+            th = unclosed_match.group(1).strip()
+            if th:
+                extracted_thoughts.append(th)
+        cleaned = re.sub(r"<(?:think|thought)>[\s\S]*$", "", cleaned, flags=re.IGNORECASE).strip()
+
+    # Strip any enclosing markdown code block
+    codeblock_match = re.match(r"^```[a-zA-Z0-9_-]*\s*\n([\s\S]*?)\n```$", cleaned)
+    if codeblock_match:
+        cleaned = codeblock_match.group(1).strip()
+    elif cleaned.startswith("```") and cleaned.endswith("```"):
+        lines = cleaned.splitlines()
+        if len(lines) >= 2:
+            cleaned = "\n".join(lines[1:-1]).strip()
+
+    # Re-check in case think tag was inside a code block or vice versa
+    cleaned = re.sub(r"<(?:think|thought)>([\s\S]*?)<\/(?:think|thought)>", replace_think, cleaned, flags=re.IGNORECASE).strip()
+    codeblock_match2 = re.match(r"^```[a-zA-Z0-9_-]*\s*\n([\s\S]*?)\n```$", cleaned)
+    if codeblock_match2:
+        cleaned = codeblock_match2.group(1).strip()
+
+    # Normalize whitespace artifacts (e.g. multiple spaces created by removed inline tags)
+    cleaned = re.sub(r"[ \t]+", " ", cleaned)
+    cleaned = re.sub(r" ?\n ?", "\n", cleaned).strip()
+
+    combined_thinking = thinking or ""
+    if extracted_thoughts:
+        more_thinking = "\n\n".join(extracted_thoughts)
+        combined_thinking = f"{combined_thinking}\n\n{more_thinking}".strip() if combined_thinking else more_thinking
+
+    return cleaned, combined_thinking
+
 async def save_assistant_message(session_id: str, msg_id: str, content: str, created_at: int, thinking: str = ""):
     """Commit completed assistant prompt to SQLite."""
-    if not content:
-        content = ""
-    cleaned_content = content.strip()
-    # Strip any enclosing markdown code block if present (e.g. ```markdown\n...\n``` or ```\n...\n```)
-    codeblock_match = re.match(r"^```[a-zA-Z0-9_-]*\s*\n([\s\S]*?)\n```$", cleaned_content)
-    if codeblock_match:
-        cleaned_content = codeblock_match.group(1).strip()
-    elif cleaned_content.startswith("```") and cleaned_content.endswith("```"):
-        lines = cleaned_content.splitlines()
-        if len(lines) >= 2:
-            cleaned_content = "\n".join(lines[1:-1]).strip()
+    cleaned_content, merged_thinking = clean_prompt_and_thinking(content, thinking)
 
     now = int(time.time() * 1000)
     try:
         async with get_db() as db:
             await db.execute(
                 "INSERT OR REPLACE INTO messages (id, session_id, role, content, thinking, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                (msg_id, session_id, "assistant", cleaned_content, thinking or "", created_at)
+                (msg_id, session_id, "assistant", cleaned_content, merged_thinking or "", created_at)
             )
             await db.execute(
                 "UPDATE sessions SET updated_at = ? WHERE id = ?",
@@ -367,18 +413,19 @@ async def chat_stream(session_id: str, payload: ChatRequest, request: Request):
         finally:
             full_content = "".join(buffer_content)
             full_thinking = "".join(buffer_thinking)
+            cleaned_content, merged_thinking = clean_prompt_and_thinking(full_content, full_thinking)
             # CRITICAL: Always persist completed prompt or error into SQLite regardless of client disconnect
             created_time = int(time.time() * 1000)
-            if full_content:
-                await save_assistant_message(session_id, assistant_msg_id, full_content, created_time, full_thinking)
+            if cleaned_content:
+                await save_assistant_message(session_id, assistant_msg_id, cleaned_content, created_time, merged_thinking)
             elif upstream_error:
                 await save_assistant_message(session_id, assistant_msg_id, f"⚠️ Error: {upstream_error}", created_time, "")
             
             await queue.put({
                 "type": "done",
                 "id": assistant_msg_id,
-                "content": full_content,
-                "thinking": full_thinking
+                "content": cleaned_content,
+                "thinking": merged_thinking
             })
             await queue.put(None)  # Sentinel to close consumer
             completed_event.set()

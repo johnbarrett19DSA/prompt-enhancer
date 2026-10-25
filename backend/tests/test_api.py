@@ -110,6 +110,17 @@ class PromptForgeBackendTests(unittest.TestCase):
         self.assertIn("models", models_data)
         self.assertIn("default_model", models_data)
 
+        model_ids = [m["id"] for m in models_data["models"]]
+        self.assertIn("deepseek/deepseek-v4.1-flash-1017:thinking", model_ids)
+        self.assertIn("z-ai/glm-5.3-flash-uncensored", model_ids)
+        self.assertIn("z-ai/glm-5.3:thinking", model_ids)
+        self.assertIn("moonshotai/kimi-k2.6:thinking", model_ids)
+
+        deepseek_model = next(m for m in models_data["models"] if m["id"] == "deepseek/deepseek-v4.1-flash-1017:thinking")
+        self.assertEqual(deepseek_model["name"], "DeepSeek V4.1 Flash (Thinking)")
+        self.assertEqual(deepseek_model["description"], "Ultra-fast reasoning model with thinking capabilities")
+        self.assertTrue(deepseek_model["supports_thinking"])
+
         # Add custom model
         custom_model = {
             "id": "custom/prompt-expert-v1",
@@ -192,6 +203,47 @@ class PromptForgeBackendTests(unittest.TestCase):
     def test_11_chat_stream_invalid_session(self):
         res = self.client.post("/api/sessions/non-existent-session-id/chat", json={"message": "hello"})
         self.assertEqual(res.status_code, 404)
+
+    def test_12_thinking_tag_stripping_and_clean_prompt(self):
+        create_res = self.client.post("/api/sessions", json={"title": "Think Tag Strip Test"})
+        session_id = create_res.json()["id"]
+
+        # Content with <think>...</think> tag and clean prompt
+        content_with_think = "<think>\nAnalyzing camera settings: 85mm f/1.4 lens, natural golden hour lighting.\n</think>\nCinematic portrait of a cyberpunk hacker in rain, neon bokeh reflections"
+        asyncio.run(save_assistant_message(session_id, "think-tag-msg-1", content_with_think, 1234570, "Initial trace"))
+
+        get_res = self.client.get(f"/api/sessions/{session_id}")
+        saved_msg = get_res.json()["messages"][0]
+        self.assertEqual(saved_msg["content"], "Cinematic portrait of a cyberpunk hacker in rain, neon bokeh reflections")
+        self.assertIn("Analyzing camera settings", saved_msg["thinking"])
+        self.assertIn("Initial trace", saved_msg["thinking"])
+
+    def test_13_inline_and_multiline_think_tags_with_codeblocks(self):
+        create_res = self.client.post("/api/sessions", json={"title": "Think + Codeblock Test"})
+        session_id = create_res.json()["id"]
+
+        # Content with <thought> tag and markdown code block
+        mixed_content = "<thought>Refining color grading and shadows</thought>\n```markdown\nA hyper-detailed isometric greenhouse with exotic bioluminescent flora\n```"
+        asyncio.run(save_assistant_message(session_id, "mixed-msg-1", mixed_content, 1234571))
+
+        get_res = self.client.get(f"/api/sessions/{session_id}")
+        saved_msg = get_res.json()["messages"][0]
+        self.assertEqual(saved_msg["content"], "A hyper-detailed isometric greenhouse with exotic bioluminescent flora")
+        self.assertEqual(saved_msg["thinking"], "Refining color grading and shadows")
+
+    def test_14_unclosed_and_multiple_think_tags(self):
+        create_res = self.client.post("/api/sessions", json={"title": "Multiple Think Tags Test"})
+        session_id = create_res.json()["id"]
+
+        # Content with multiple think tags and unclosed think tag
+        complex_content = "<think>Step 1: Composition</think> Mid-century modern living room <think>Step 2: Lighting</think> with floor-to-ceiling windows"
+        asyncio.run(save_assistant_message(session_id, "multi-think-1", complex_content, 1234572))
+
+        get_res = self.client.get(f"/api/sessions/{session_id}")
+        saved_msg = get_res.json()["messages"][0]
+        self.assertEqual(saved_msg["content"], "Mid-century modern living room with floor-to-ceiling windows")
+        self.assertIn("Step 1: Composition", saved_msg["thinking"])
+        self.assertIn("Step 2: Lighting", saved_msg["thinking"])
 
 if __name__ == "__main__":
     unittest.main()

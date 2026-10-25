@@ -14,6 +14,34 @@ DEFAULT_MODELS = [
         "is_default": True
     },
     {
+        "id": "z-ai/glm-5.3-flash-uncensored",
+        "name": "GLM 5.3 Flash Uncensored",
+        "description": "Uncensored fast reasoning flagship",
+        "supports_thinking": True,
+        "is_default": False
+    },
+    {
+        "id": "z-ai/glm-5.3:thinking",
+        "name": "GLM 5.3 Thinking",
+        "description": "Flagship reasoning model fine-tuned for deep thinking",
+        "supports_thinking": True,
+        "is_default": False
+    },
+    {
+        "id": "moonshotai/kimi-k2.6:thinking",
+        "name": "Kimi k2.6 (Thinking)",
+        "description": "Advanced long-context reasoning with deep thought traces",
+        "supports_thinking": True,
+        "is_default": False
+    },
+    {
+        "id": "deepseek/deepseek-v4.1-flash-1017:thinking",
+        "name": "DeepSeek V4.1 Flash (Thinking)",
+        "description": "Ultra-fast reasoning model with thinking capabilities",
+        "supports_thinking": True,
+        "is_default": False
+    },
+    {
         "id": "meta/muse-spark-1.3-contributor",
         "name": "Muse Spark 1.3 Contributor",
         "description": "Meta Muse specialized vision-prompt synthesis",
@@ -68,7 +96,17 @@ def _load_config_sync() -> ModelsConfig:
     try:
         with open(MODELS_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-            return ModelsConfig(**data)
+            cfg = ModelsConfig(**data)
+            # Ensure all DEFAULT_MODELS exist in cfg.models
+            existing_ids = {m.id for m in cfg.models}
+            added = False
+            for default_m in DEFAULT_MODELS:
+                if default_m["id"] not in existing_ids:
+                    cfg.models.append(ModelItem(**default_m))
+                    added = True
+            if added:
+                _save_config_sync(cfg)
+            return cfg
     except Exception:
         cfg = ModelsConfig()
         _save_config_sync(cfg)

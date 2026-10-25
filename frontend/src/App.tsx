@@ -397,13 +397,18 @@ export function App() {
           }
 
           if (chunk.type === 'done') {
-            if (chunk.id && chunk.content) {
+            if (chunk.id && chunk.content !== undefined) {
               setMessages((prev) => {
                 const last = prev[prev.length - 1];
                 if (last && last.role === 'assistant') {
                   return [
                     ...prev.slice(0, -1),
-                    { ...last, id: chunk.id!, content: chunk.content! },
+                    {
+                      ...last,
+                      id: chunk.id!,
+                      content: chunk.content!,
+                      thinking: chunk.thinking !== undefined ? chunk.thinking : last.thinking,
+                    },
                   ];
                 }
                 return prev;

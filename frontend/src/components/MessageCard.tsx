@@ -16,7 +16,18 @@ export const MessageCard: React.FC<MessageCardProps> = ({ message, isStreaming =
   const handleCopy = async () => {
     if (!message.content) return;
     try {
-      await navigator.clipboard.writeText(message.content);
+      let textToCopy = message.content.trim();
+      textToCopy = textToCopy.replace(/<(?:think|thought)>[\s\S]*?<\/(?:think|thought)>\s*/gi, '').trim();
+      const codeblockMatch = textToCopy.match(/^```[a-zA-Z0-9_-]*\s*\n([\s\S]*?)\n```$/);
+      if (codeblockMatch) {
+        textToCopy = codeblockMatch[1].trim();
+      } else if (textToCopy.startsWith('```') && textToCopy.endsWith('```')) {
+        const lines = textToCopy.split('\n');
+        if (lines.length >= 2) {
+          textToCopy = lines.slice(1, -1).join('\n').trim();
+        }
+      }
+      await navigator.clipboard.writeText(textToCopy);
       // Trigger short haptic feedback on iOS/Android if supported
       if (typeof navigator !== 'undefined' && navigator.vibrate) {
         navigator.vibrate([20]);

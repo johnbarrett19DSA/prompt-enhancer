@@ -12,8 +12,8 @@ export default {
         borderline: "#27272a",
       },
       spacing: {
-        'safe-top-blur': 'max(calc(env(safe-area-inset-top, 0px) + 0.75rem), 2.75rem)',
-        'safe-modal-top': 'max(calc(env(safe-area-inset-top, 0px) + 1rem), 3rem)',
+        'safe-top-blur': 'max(calc(env(safe-area-inset-top, 0px) + 0.875rem), 3.25rem)',
+        'safe-modal-top': 'max(calc(env(safe-area-inset-top, 0px) + 1.25rem), 3.75rem)',
       },
     },
   },

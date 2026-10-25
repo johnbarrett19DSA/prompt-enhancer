@@ -64,7 +64,7 @@ export const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 pt-safe-modal-top pb-[max(calc(env(safe-area-inset-bottom,0px)+0.5rem),1rem)]">
+    <div className="fixed inset-0 z-50 flex items-start sm:items-center justify-center p-3 sm:p-4 pt-safe-modal-top pb-[max(calc(env(safe-area-inset-bottom,0px)+0.5rem),1rem)]">
       {/* Backdrop */}
       <div
         className="fixed inset-0 bg-black/85 backdrop-blur-md transition-opacity"
@@ -72,7 +72,7 @@ export const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
       />
 
       {/* Modal Dialog */}
-      <div className="relative w-full max-w-lg bg-zinc-950 border border-zinc-800 rounded-2xl shadow-2xl flex flex-col max-h-[calc(100dvh-max(calc(env(safe-area-inset-top,0px)+2rem),4rem))] overflow-hidden z-10 animate-in fade-in zoom-in-95 duration-150">
+      <div className="relative w-full max-w-lg bg-zinc-950 border border-zinc-800 rounded-2xl shadow-2xl flex flex-col max-h-[calc(100dvh-max(calc(env(safe-area-inset-top,0px)+2.5rem),5rem))] overflow-hidden z-10 animate-in fade-in zoom-in-95 duration-150">
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-800">
           <div className="flex items-center gap-2">

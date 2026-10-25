@@ -7,7 +7,7 @@ const getApiBase = () => {
       return '/promptforge/api';
     }
   }
-  return './api';
+  return '/api';
 };
 
 const API_BASE = getApiBase();
@@ -20,7 +20,11 @@ export async function fetchSessions(): Promise<Session[]> {
 
 export async function fetchSession(id: string): Promise<{ id: string; title: string; model: string; created_at: number; updated_at: number; messages: Message[] }> {
   const res = await fetch(`${API_BASE}/sessions/${id}`);
-  if (!res.ok) throw new Error('Failed to fetch session');
+  if (!res.ok) {
+    const error: any = new Error(`Failed to fetch session (${res.status})`);
+    error.status = res.status;
+    throw error;
+  }
   return res.json();
 }
 

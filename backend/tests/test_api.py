@@ -165,5 +165,33 @@ class PromptForgeBackendTests(unittest.TestCase):
         get_u = self.client.get(f"/api/sessions/{u_id}")
         self.assertEqual(get_u.json()["title"], unicode_title)
 
+    def test_09_markdown_language_tags_and_whitespace(self):
+        create_res = self.client.post("/api/sessions", json={"title": "Tag Strip Test"})
+        session_id = create_res.json()["id"]
+
+        # Code block with text tag and whitespace
+        tagged_prompt = "```text   \nMacro eye reflection of neon Tokyo rain\n```"
+        asyncio.run(save_assistant_message(session_id, "tag-test-1", tagged_prompt, 1234568))
+
+        get_res = self.client.get(f"/api/sessions/{session_id}")
+        saved_msg = get_res.json()["messages"][0]
+        self.assertEqual(saved_msg["content"], "Macro eye reflection of neon Tokyo rain")
+
+    def test_10_assistant_error_message_persistence(self):
+        create_res = self.client.post("/api/sessions", json={"title": "Error Persist Test"})
+        session_id = create_res.json()["id"]
+
+        error_content = "⚠️ Error: Upstream connection failure: Connection timed out"
+        asyncio.run(save_assistant_message(session_id, "err-msg-1", error_content, 1234569))
+
+        get_res = self.client.get(f"/api/sessions/{session_id}")
+        saved_msg = get_res.json()["messages"][0]
+        self.assertEqual(saved_msg["role"], "assistant")
+        self.assertTrue(saved_msg["content"].startswith("⚠️ Error"))
+
+    def test_11_chat_stream_invalid_session(self):
+        res = self.client.post("/api/sessions/non-existent-session-id/chat", json={"message": "hello"})
+        self.assertEqual(res.status_code, 404)
+
 if __name__ == "__main__":
     unittest.main()

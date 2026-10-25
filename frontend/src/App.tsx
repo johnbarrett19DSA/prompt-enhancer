@@ -10,7 +10,14 @@ import { Camera, ArrowRight } from 'lucide-react';
 
 export function App() {
   const [sessions, setSessions] = useState<Session[]>([]);
-  const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
+  const [currentSessionId, setCurrentSessionId] = useState<string | null>(() => {
+    try {
+      const urlParams = new URLSearchParams(window.location.search);
+      return urlParams.get('session') || localStorage.getItem('promptforge_active_session_id') || null;
+    } catch {
+      return null;
+    }
+  });
   const [messages, setMessages] = useState<Message[]>([]);
   const [modelsConfig, setModelsConfig] = useState<ModelsConfig | null>(null);
   const [activeModel, setActiveModel] = useState<string>(() => {
@@ -67,6 +74,25 @@ export function App() {
     const lastMsg = initialMsgs && initialMsgs.length > 0 ? initialMsgs[initialMsgs.length - 1] : null;
     // If last message is from user and was submitted recently (< 150 seconds ago), poll for completion
     if (lastMsg && lastMsg.role === 'user' && (Date.now() - lastMsg.created_at) < 150000) {
+      setIsStreaming(true);
+      setMessages((prev) => {
+        const last = prev.length > 0 ? prev[prev.length - 1] : null;
+        if (last && last.role === 'user') {
+          return [
+            ...prev,
+            {
+              id: `pending-${last.id}`,
+              session_id: sessionIdToCheck,
+              role: 'assistant',
+              content: '',
+              thinking: 'Recovering prompt architect generation from server...',
+              created_at: Date.now(),
+            },
+          ];
+        }
+        return prev;
+      });
+
       let attempts = 0;
       pollIntervalRef.current = setInterval(async () => {
         attempts++;
@@ -81,11 +107,16 @@ export function App() {
             const updatedSessions = await api.fetchSessions();
             setSessions(updatedSessions);
             setTimeout(() => scrollToBottom('smooth'), 50);
-          } else if (attempts >= 20) {
+          } else if (attempts >= 25) {
             stopPolling();
+            setIsStreaming(false);
+            setStreamingError('Prompt generation timed out or was interrupted. You can resubmit.');
           }
         } catch {
-          stopPolling();
+          if (attempts >= 25) {
+            stopPolling();
+            setIsStreaming(false);
+          }
         }
       }, 2000);
     }
@@ -112,9 +143,13 @@ export function App() {
       updateUrlSession(data.id);
       setTimeout(() => scrollToBottom('auto'), 50);
       checkPendingGeneration(data.id, data.messages || []);
-    } catch (err) {
-      console.warn('Session load failed, creating a new session:', err);
-      await handleNewSession(configFallback);
+    } catch (err: any) {
+      if (err?.status === 404) {
+        console.warn('Session not found on server, creating a new session:', err);
+        await handleNewSession(configFallback);
+      } else {
+        console.error('Session load failed (network/temporary error):', err);
+      }
     }
   }, [checkPendingGeneration, scrollToBottom, stopPolling]);
 
@@ -183,21 +218,21 @@ export function App() {
     initApp();
   }, [loadSession]);
 
-  // Handle re-focus / tab wake-up / iOS PWA resume rehydration
+  // Handle tab wake-up / iOS PWA resume rehydration
   useEffect(() => {
     const handleRehydrate = () => {
       if (document.visibilityState === 'visible' && currentSessionId) {
-        setIsStreaming(false);
-        loadSession(currentSessionId);
+        // If an SSE stream is actively receiving data, do not clobber it; otherwise reload session to fetch completed server prompt
+        if (!abortControllerRef.current) {
+          loadSession(currentSessionId);
+        }
       }
     };
     document.addEventListener('visibilitychange', handleRehydrate);
     window.addEventListener('pageshow', handleRehydrate);
-    window.addEventListener('focus', handleRehydrate);
     return () => {
       document.removeEventListener('visibilitychange', handleRehydrate);
       window.removeEventListener('pageshow', handleRehydrate);
-      window.removeEventListener('focus', handleRehydrate);
       stopPolling();
     };
   }, [currentSessionId, loadSession, stopPolling]);

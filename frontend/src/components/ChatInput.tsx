@@ -30,13 +30,29 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   });
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const prevSessionIdRef = useRef(sessionId);
+  const textRef = useRef(text);
+  textRef.current = text;
 
   // Sync draft when switching sessions
   useEffect(() => {
     if (prevSessionIdRef.current !== sessionId) {
+      const currentText = textRef.current;
+      // Commit draft for previous session before switching
+      if (prevSessionIdRef.current && currentText) {
+        try {
+          localStorage.setItem(getDraftKey(prevSessionIdRef.current), currentText);
+        } catch {}
+      }
       try {
         const draft = localStorage.getItem(getDraftKey(sessionId));
-        setText(draft || '');
+        if (draft !== null) {
+          setText(draft);
+        } else if (!prevSessionIdRef.current && currentText) {
+          // Preserve typed draft into newly initialized session
+          localStorage.setItem(getDraftKey(sessionId), currentText);
+        } else {
+          setText('');
+        }
       } catch {
         setText('');
       }

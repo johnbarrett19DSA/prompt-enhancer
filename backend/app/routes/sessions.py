@@ -2,6 +2,7 @@ import time
 import uuid
 import json
 import asyncio
+import re
 import httpx
 from typing import Optional, List, Dict, Any
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Request
@@ -197,8 +198,11 @@ async def save_assistant_message(session_id: str, msg_id: str, content: str, cre
     if not content:
         content = ""
     cleaned_content = content.strip()
-    # Strip any enclosing markdown code block if present
-    if cleaned_content.startswith("```") and cleaned_content.endswith("```"):
+    # Strip any enclosing markdown code block if present (e.g. ```markdown\n...\n``` or ```\n...\n```)
+    codeblock_match = re.match(r"^```[a-zA-Z0-9_-]*\s*\n([\s\S]*?)\n```$", cleaned_content)
+    if codeblock_match:
+        cleaned_content = codeblock_match.group(1).strip()
+    elif cleaned_content.startswith("```") and cleaned_content.endswith("```"):
         lines = cleaned_content.splitlines()
         if len(lines) >= 2:
             cleaned_content = "\n".join(lines[1:-1]).strip()
@@ -304,6 +308,7 @@ async def chat_stream(session_id: str, payload: ChatRequest, request: Request):
             "Authorization": f"Bearer {NANOGPT_API_KEY}",
             "Content-Type": "application/json"
         }
+        upstream_error: Optional[str] = None
 
         try:
             timeout = httpx.Timeout(connect=15.0, read=120.0, write=15.0, pool=15.0)
@@ -312,9 +317,10 @@ async def chat_stream(session_id: str, payload: ChatRequest, request: Request):
                     if response.status_code != 200:
                         error_body = await response.aread()
                         err_text = error_body.decode("utf-8", errors="replace")
+                        upstream_error = f"NanoGPT upstream error {response.status_code}: {err_text}"
                         await queue.put({
                             "type": "error",
-                            "error": f"NanoGPT upstream error {response.status_code}: {err_text}"
+                            "error": upstream_error
                         })
                         return
 
@@ -353,17 +359,20 @@ async def chat_stream(session_id: str, payload: ChatRequest, request: Request):
                             except Exception:
                                 pass
         except Exception as e:
+            upstream_error = f"Upstream connection failure: {str(e)}"
             await queue.put({
                 "type": "error",
-                "error": f"Upstream connection failure: {str(e)}"
+                "error": upstream_error
             })
         finally:
             full_content = "".join(buffer_content)
             full_thinking = "".join(buffer_thinking)
-            # CRITICAL: Always persist completed prompt into SQLite regardless of client disconnect
+            # CRITICAL: Always persist completed prompt or error into SQLite regardless of client disconnect
             created_time = int(time.time() * 1000)
             if full_content:
                 await save_assistant_message(session_id, assistant_msg_id, full_content, created_time, full_thinking)
+            elif upstream_error:
+                await save_assistant_message(session_id, assistant_msg_id, f"⚠️ Error: {upstream_error}", created_time, "")
             
             await queue.put({
                 "type": "done",

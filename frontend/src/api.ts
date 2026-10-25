@@ -1,6 +1,16 @@
 import { Session, Message, ModelsConfig, ModelItem } from './types';
 
-const API_BASE = './api';
+const getApiBase = () => {
+  if (typeof window !== 'undefined') {
+    const path = window.location.pathname;
+    if (path.startsWith('/promptforge')) {
+      return '/promptforge/api';
+    }
+  }
+  return './api';
+};
+
+const API_BASE = getApiBase();
 
 export async function fetchSessions(): Promise<Session[]> {
   const res = await fetch(`${API_BASE}/sessions`);

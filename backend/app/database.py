@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS messages (
     session_id TEXT NOT NULL,
     role TEXT NOT NULL CHECK(role IN ('user', 'assistant', 'system')),
     content TEXT NOT NULL,
+    thinking TEXT DEFAULT '',
     created_at INTEGER NOT NULL,
     FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
@@ -28,6 +29,11 @@ async def init_db() -> None:
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("PRAGMA foreign_keys = ON;")
         await db.executescript(SCHEMA)
+        # Check and apply migration for existing databases missing 'thinking' column
+        async with db.execute("PRAGMA table_info(messages)") as cursor:
+            columns = [row[1] for row in await cursor.fetchall()]
+            if "thinking" not in columns:
+                await db.execute("ALTER TABLE messages ADD COLUMN thinking TEXT DEFAULT ''")
         await db.commit()
 
 @asynccontextmanager

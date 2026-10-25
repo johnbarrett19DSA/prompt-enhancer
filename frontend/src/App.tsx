@@ -13,8 +13,20 @@ export function App() {
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [modelsConfig, setModelsConfig] = useState<ModelsConfig | null>(null);
-  const [activeModel, setActiveModel] = useState<string>('z-ai/glm-5.3-flash');
-  const [activeThinking, setActiveThinking] = useState<string>('high');
+  const [activeModel, setActiveModel] = useState<string>(() => {
+    try {
+      return localStorage.getItem('promptforge_active_model') || 'z-ai/glm-5.3-flash';
+    } catch {
+      return 'z-ai/glm-5.3-flash';
+    }
+  });
+  const [activeThinking, setActiveThinking] = useState<string>(() => {
+    try {
+      return localStorage.getItem('promptforge_active_thinking') || 'high';
+    } catch {
+      return 'high';
+    }
+  });
 
   // UI Drawer & Modal States
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
@@ -24,6 +36,14 @@ export function App() {
 
   const abortControllerRef = useRef<AbortController | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const stopPolling = useCallback(() => {
+    if (pollIntervalRef.current) {
+      clearInterval(pollIntervalRef.current);
+      pollIntervalRef.current = null;
+    }
+  }, []);
 
   // Sync session ID to URL search params
   const updateUrlSession = (sessionId: string | null) => {
@@ -41,6 +61,85 @@ export function App() {
     messagesEndRef.current?.scrollIntoView({ behavior, block: 'end' });
   }, []);
 
+  // Check if server completed an assistant generation while client was dropped or disconnected
+  const checkPendingGeneration = useCallback((sessionIdToCheck: string, initialMsgs: Message[]) => {
+    stopPolling();
+    const lastMsg = initialMsgs && initialMsgs.length > 0 ? initialMsgs[initialMsgs.length - 1] : null;
+    // If last message is from user and was submitted recently (< 150 seconds ago), poll for completion
+    if (lastMsg && lastMsg.role === 'user' && (Date.now() - lastMsg.created_at) < 150000) {
+      let attempts = 0;
+      pollIntervalRef.current = setInterval(async () => {
+        attempts++;
+        try {
+          const freshData = await api.fetchSession(sessionIdToCheck);
+          const freshMsgs = freshData.messages || [];
+          const freshLast = freshMsgs.length > 0 ? freshMsgs[freshMsgs.length - 1] : null;
+          if (freshLast && freshLast.role === 'assistant') {
+            stopPolling();
+            setMessages(freshMsgs);
+            setIsStreaming(false);
+            const updatedSessions = await api.fetchSessions();
+            setSessions(updatedSessions);
+            setTimeout(() => scrollToBottom('smooth'), 50);
+          } else if (attempts >= 20) {
+            stopPolling();
+          }
+        } catch {
+          stopPolling();
+        }
+      }, 2000);
+    }
+  }, [stopPolling, scrollToBottom]);
+
+  // Load a session by ID
+  const loadSession = useCallback(async (id: string, configFallback?: ModelsConfig | null) => {
+    stopPolling();
+    try {
+      const data = await api.fetchSession(id);
+      setCurrentSessionId(data.id);
+      try {
+        localStorage.setItem('promptforge_active_session_id', data.id);
+      } catch {}
+      if (data.model) {
+        setActiveModel(data.model);
+        try {
+          localStorage.setItem('promptforge_active_model', data.model);
+        } catch {}
+      } else if (configFallback?.default_model) {
+        setActiveModel(configFallback.default_model);
+      }
+      setMessages(data.messages || []);
+      updateUrlSession(data.id);
+      setTimeout(() => scrollToBottom('auto'), 50);
+      checkPendingGeneration(data.id, data.messages || []);
+    } catch (err) {
+      console.warn('Session load failed, creating a new session:', err);
+      await handleNewSession(configFallback);
+    }
+  }, [checkPendingGeneration, scrollToBottom, stopPolling]);
+
+  // Create a brand new session
+  const handleNewSession = async (cfgOverride?: ModelsConfig | null) => {
+    stopPolling();
+    try {
+      const cfg = cfgOverride || modelsConfig;
+      const modelToUse = activeModel || cfg?.default_model || 'z-ai/glm-5.3-flash';
+      const created = await api.createSession({
+        title: 'New Session',
+        model: modelToUse,
+      });
+      setSessions((prev) => [created, ...prev]);
+      setCurrentSessionId(created.id);
+      try {
+        localStorage.setItem('promptforge_active_session_id', created.id);
+      } catch {}
+      setMessages([]);
+      updateUrlSession(created.id);
+    } catch (err) {
+      console.error('Failed to create new session:', err);
+    }
+  };
+
   // 1. Initial Load: Fetch models config & sessions list
   useEffect(() => {
     const initApp = async () => {
@@ -52,11 +151,20 @@ export function App() {
         setModelsConfig(config);
         setSessions(sessList);
 
-        // Check URL for session param or pick most recent
+        // Check URL for session param, then localStorage, then most recent session
         const urlParams = new URLSearchParams(window.location.search);
         const urlSessionId = urlParams.get('session');
+        let savedSessionId: string | null = null;
+        try {
+          savedSessionId = localStorage.getItem('promptforge_active_session_id');
+        } catch {}
 
-        let targetSessionId = urlSessionId;
+        let targetSessionId = urlSessionId || savedSessionId;
+        // Verify session exists in server list
+        if (targetSessionId && !sessList.some((s) => s.id === targetSessionId)) {
+          targetSessionId = null;
+        }
+
         if (!targetSessionId && sessList.length > 0) {
           targetSessionId = sessList[0].id;
         }
@@ -73,55 +181,33 @@ export function App() {
     };
 
     initApp();
-  }, []);
+  }, [loadSession]);
 
-  // Handle re-focus / tab wake-up rehydration (especially for iOS PWA)
+  // Handle re-focus / tab wake-up / iOS PWA resume rehydration
   useEffect(() => {
-    const handleVisibilityChange = () => {
+    const handleRehydrate = () => {
       if (document.visibilityState === 'visible' && currentSessionId) {
+        setIsStreaming(false);
         loadSession(currentSessionId);
       }
     };
-    document.addEventListener('visibilitychange', handleVisibilityChange);
-    return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
-  }, [currentSessionId]);
-
-  // Load a session by ID
-  const loadSession = async (id: string, configFallback?: ModelsConfig | null) => {
-    try {
-      const data = await api.fetchSession(id);
-      setCurrentSessionId(data.id);
-      setActiveModel(data.model || configFallback?.default_model || 'z-ai/glm-5.3-flash');
-      setMessages(data.messages || []);
-      updateUrlSession(data.id);
-      setTimeout(() => scrollToBottom('auto'), 50);
-    } catch (err) {
-      console.warn('Session load failed, creating a new session:', err);
-      await handleNewSession(configFallback);
-    }
-  };
-
-  // Create a brand new session
-  const handleNewSession = async (cfgOverride?: ModelsConfig | null) => {
-    try {
-      const cfg = cfgOverride || modelsConfig;
-      const modelToUse = activeModel || cfg?.default_model || 'z-ai/glm-5.3-flash';
-      const created = await api.createSession({
-        title: 'New Session',
-        model: modelToUse,
-      });
-      setSessions((prev) => [created, ...prev]);
-      setCurrentSessionId(created.id);
-      setMessages([]);
-      updateUrlSession(created.id);
-    } catch (err) {
-      console.error('Failed to create new session:', err);
-    }
-  };
+    document.addEventListener('visibilitychange', handleRehydrate);
+    window.addEventListener('pageshow', handleRehydrate);
+    window.addEventListener('focus', handleRehydrate);
+    return () => {
+      document.removeEventListener('visibilitychange', handleRehydrate);
+      window.removeEventListener('pageshow', handleRehydrate);
+      window.removeEventListener('focus', handleRehydrate);
+      stopPolling();
+    };
+  }, [currentSessionId, loadSession, stopPolling]);
 
   // Switch model and sync with backend session
   const handleSelectModel = async (modelId: string) => {
     setActiveModel(modelId);
+    try {
+      localStorage.setItem('promptforge_active_model', modelId);
+    } catch {}
     if (currentSessionId) {
       try {
         await api.updateSession(currentSessionId, { model: modelId });
@@ -137,6 +223,9 @@ export function App() {
   // Change thinking level
   const handleSelectThinking = (thinking: string) => {
     setActiveThinking(thinking);
+    try {
+      localStorage.setItem('promptforge_active_thinking', thinking);
+    } catch {}
   };
 
   // Add custom model
@@ -151,6 +240,9 @@ export function App() {
     setModelsConfig(updated);
     if (activeModel === modelId) {
       setActiveModel(updated.default_model);
+      try {
+        localStorage.setItem('promptforge_active_model', updated.default_model);
+      } catch {}
     }
   };
 
@@ -161,6 +253,10 @@ export function App() {
       default_thinking: thinking,
     });
     setModelsConfig(updated);
+    try {
+      localStorage.setItem('promptforge_active_model', modelId);
+      localStorage.setItem('promptforge_active_thinking', thinking);
+    } catch {}
   };
 
   // Delete session
@@ -170,9 +266,13 @@ export function App() {
       const remaining = sessions.filter((s) => s.id !== id);
       setSessions(remaining);
       if (currentSessionId === id) {
+        stopPolling();
         if (remaining.length > 0) {
           await loadSession(remaining[0].id);
         } else {
+          try {
+            localStorage.removeItem('promptforge_active_session_id');
+          } catch {}
           await handleNewSession();
         }
       }
@@ -380,6 +480,7 @@ export function App() {
         onSendMessage={handleSendMessage}
         onStopStreaming={handleStopStreaming}
         isStreaming={isStreaming}
+        sessionId={currentSessionId}
       />
 
       {/* Session Drawer */}

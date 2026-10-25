@@ -51,7 +51,7 @@ export const SessionDrawer: React.FC<SessionDrawerProps> = ({
       />
 
       {/* Drawer Container */}
-      <div className="relative w-5/6 max-w-sm h-full bg-zinc-950 border-r border-zinc-800 flex flex-col z-10 shadow-2xl pt-[env(safe-area-inset-top,0.5rem)] pb-[env(safe-area-inset-bottom,0.5rem)]">
+      <div className="relative w-5/6 max-w-sm h-full bg-zinc-950 border-r border-zinc-800 flex flex-col z-10 shadow-2xl pt-safe-top-blur pb-[max(calc(env(safe-area-inset-bottom,0px)+0.5rem),1rem)]">
         {/* Drawer Header */}
         <div className="flex items-center justify-between px-4 py-3 border-b border-zinc-800">
           <div className="flex items-center gap-2">

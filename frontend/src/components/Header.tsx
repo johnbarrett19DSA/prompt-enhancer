@@ -24,7 +24,7 @@ export const Header: React.FC<HeaderProps> = ({
   const displayName = modelInfo ? modelInfo.name.split(' (')[0] : activeModel.split('/').pop() || activeModel;
 
   return (
-    <header className="flex-none bg-black/95 backdrop-blur-md border-b border-zinc-800/80 px-3 pt-[env(safe-area-inset-top,0.5rem)] pb-2.5 z-30">
+    <header className="flex-none bg-black/95 backdrop-blur-md border-b border-zinc-800/80 px-3 pt-safe-top-blur pb-2.5 z-30">
       <div className="flex items-center justify-between h-11 max-w-4xl mx-auto">
         {/* Left: Session Drawer Toggle */}
         <button

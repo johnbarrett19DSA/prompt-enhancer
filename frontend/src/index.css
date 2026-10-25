@@ -8,6 +8,16 @@
     --safe-bottom: env(safe-area-inset-bottom, 0px);
     --safe-left: env(safe-area-inset-left, 0px);
     --safe-right: env(safe-area-inset-right, 0px);
+    --safe-top-blur: max(calc(env(safe-area-inset-top, 0px) + 0.75rem), 2.75rem);
+  }
+}
+
+@layer utilities {
+  .pt-safe-top-blur {
+    padding-top: max(calc(env(safe-area-inset-top, 0px) + 0.75rem), 2.75rem);
+  }
+  .pt-safe-modal-top {
+    padding-top: max(calc(env(safe-area-inset-top, 0px) + 1rem), 3rem);
   }
 
   html, body {

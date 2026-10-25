@@ -1,11 +1,15 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { ArrowUp, Square } from 'lucide-react';
 
+const DRAFT_PREFIX = 'promptforge_draft';
+const getDraftKey = (sessId?: string | null) => `${DRAFT_PREFIX}_${sessId || 'global'}`;
+
 interface ChatInputProps {
   onSendMessage: (message: string) => void;
   onStopStreaming: () => void;
   isStreaming: boolean;
   disabled?: boolean;
+  sessionId?: string | null;
 }
 
 export const ChatInput: React.FC<ChatInputProps> = ({
@@ -13,9 +17,32 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   onStopStreaming,
   isStreaming,
   disabled = false,
+  sessionId = null,
 }) => {
-  const [text, setText] = useState('');
+  const [text, setText] = useState(() => {
+    try {
+      const specific = localStorage.getItem(getDraftKey(sessionId));
+      if (specific !== null) return specific;
+      return localStorage.getItem(`${DRAFT_PREFIX}_global`) || localStorage.getItem('promptforge_draft_input') || '';
+    } catch {
+      return '';
+    }
+  });
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const prevSessionIdRef = useRef(sessionId);
+
+  // Sync draft when switching sessions
+  useEffect(() => {
+    if (prevSessionIdRef.current !== sessionId) {
+      try {
+        const draft = localStorage.getItem(getDraftKey(sessionId));
+        setText(draft || '');
+      } catch {
+        setText('');
+      }
+      prevSessionIdRef.current = sessionId;
+    }
+  }, [sessionId]);
 
   // Auto-resize textarea
   useEffect(() => {
@@ -27,6 +54,23 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     }
   }, [text]);
 
+  const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    const val = e.target.value;
+    setText(val);
+    try {
+      const key = getDraftKey(sessionId);
+      if (val) {
+        localStorage.setItem(key, val);
+        localStorage.setItem('promptforge_draft_input', val);
+      } else {
+        localStorage.removeItem(key);
+        localStorage.removeItem('promptforge_draft_input');
+      }
+    } catch {
+      // Ignore localStorage errors (e.g. private mode quota)
+    }
+  };
+
   const handleSubmit = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     if (isStreaming) {
@@ -37,6 +81,12 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     if (!trimmed || disabled) return;
     onSendMessage(trimmed);
     setText('');
+    try {
+      localStorage.removeItem(getDraftKey(sessionId));
+      localStorage.removeItem('promptforge_draft_input');
+    } catch {
+      // Ignore
+    }
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
     }
@@ -57,7 +107,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
             ref={textareaRef}
             rows={1}
             value={text}
-            onChange={(e) => setText(e.target.value)}
+            onChange={handleChange}
             onKeyDown={handleKeyDown}
             placeholder={
               isStreaming

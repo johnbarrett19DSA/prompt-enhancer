@@ -34,6 +34,7 @@ class MessageSchema(BaseModel):
     session_id: str
     role: str
     content: str
+    thinking: Optional[str] = ""
     created_at: int
 
 class SessionDetailSchema(BaseModel):
@@ -43,6 +44,9 @@ class SessionDetailSchema(BaseModel):
     created_at: int
     updated_at: int
     messages: List[MessageSchema]
+
+# Global strong-reference set to prevent Python GC from dropping active background tasks
+_active_background_tasks: set[asyncio.Task] = set()
 
 @router.get("")
 async def list_sessions():
@@ -112,7 +116,7 @@ async def get_session(session_id: str):
                 raise HTTPException(status_code=404, detail="Session not found")
 
         async with db.execute(
-            "SELECT * FROM messages WHERE session_id = ? ORDER BY created_at ASC",
+            "SELECT id, session_id, role, content, thinking, created_at FROM messages WHERE session_id = ? ORDER BY created_at ASC",
             (session_id,)
         ) as cursor:
             msg_rows = await cursor.fetchall()
@@ -129,6 +133,7 @@ async def get_session(session_id: str):
                 "session_id": row["session_id"],
                 "role": row["role"],
                 "content": row["content"],
+                "thinking": row["thinking"] or "",
                 "created_at": row["created_at"]
             }
             for row in msg_rows
@@ -187,7 +192,7 @@ async def update_session(session_id: str, payload: UpdateSessionRequest):
         "updated_at": row["updated_at"]
     }
 
-async def save_assistant_message(session_id: str, msg_id: str, content: str, created_at: int):
+async def save_assistant_message(session_id: str, msg_id: str, content: str, created_at: int, thinking: str = ""):
     """Commit completed assistant prompt to SQLite."""
     if not content:
         content = ""
@@ -202,8 +207,8 @@ async def save_assistant_message(session_id: str, msg_id: str, content: str, cre
     try:
         async with get_db() as db:
             await db.execute(
-                "INSERT OR REPLACE INTO messages (id, session_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)",
-                (msg_id, session_id, "assistant", cleaned_content, created_at)
+                "INSERT OR REPLACE INTO messages (id, session_id, role, content, thinking, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (msg_id, session_id, "assistant", cleaned_content, thinking or "", created_at)
             )
             await db.execute(
                 "UPDATE sessions SET updated_at = ? WHERE id = ?",
@@ -354,21 +359,25 @@ async def chat_stream(session_id: str, payload: ChatRequest, request: Request):
             })
         finally:
             full_content = "".join(buffer_content)
+            full_thinking = "".join(buffer_thinking)
             # CRITICAL: Always persist completed prompt into SQLite regardless of client disconnect
             created_time = int(time.time() * 1000)
             if full_content:
-                await save_assistant_message(session_id, assistant_msg_id, full_content, created_time)
+                await save_assistant_message(session_id, assistant_msg_id, full_content, created_time, full_thinking)
             
             await queue.put({
                 "type": "done",
                 "id": assistant_msg_id,
-                "content": full_content
+                "content": full_content,
+                "thinking": full_thinking
             })
             await queue.put(None)  # Sentinel to close consumer
             completed_event.set()
 
-    # Launch background fetch task so disconnect cannot cancel the DB write
+    # Launch background fetch task and retain strong reference so disconnect or GC cannot cancel the DB write
     bg_task = asyncio.create_task(fetch_upstream_and_persist())
+    _active_background_tasks.add(bg_task)
+    bg_task.add_done_callback(_active_background_tasks.discard)
 
     async def sse_event_generator():
         try:

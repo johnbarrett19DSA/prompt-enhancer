@@ -3,7 +3,7 @@ set -e
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$DIR"
 
-PORT="${PORT:-4001}"
+PORT="${PORT:-4002}"
 HOST="${HOST:-127.0.0.1}"
 
 if [ -f "$DIR/backend/venv/bin/uvicorn" ]; then

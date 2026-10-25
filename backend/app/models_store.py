@@ -97,14 +97,24 @@ def _load_config_sync() -> ModelsConfig:
         with open(MODELS_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
             cfg = ModelsConfig(**data)
-            # Ensure all DEFAULT_MODELS exist in cfg.models
-            existing_ids = {m.id for m in cfg.models}
-            added = False
+            # Ensure all DEFAULT_MODELS exist in cfg.models and update metadata if changed
+            existing_map = {m.id: m for m in cfg.models}
+            modified = False
             for default_m in DEFAULT_MODELS:
-                if default_m["id"] not in existing_ids:
+                m_id = default_m["id"]
+                if m_id not in existing_map:
                     cfg.models.append(ModelItem(**default_m))
-                    added = True
-            if added:
+                    modified = True
+                else:
+                    item = existing_map[m_id]
+                    if (item.name != default_m["name"] or
+                        item.description != default_m["description"] or
+                        item.supports_thinking != default_m["supports_thinking"]):
+                        item.name = default_m["name"]
+                        item.description = default_m["description"]
+                        item.supports_thinking = default_m["supports_thinking"]
+                        modified = True
+            if modified:
                 _save_config_sync(cfg)
             return cfg
     except Exception:

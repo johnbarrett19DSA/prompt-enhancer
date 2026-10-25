@@ -7,26 +7,72 @@ interface MessageCardProps {
   isStreaming?: boolean;
 }
 
+export function cleanPromptText(raw: string): string {
+  if (!raw) return '';
+  let text = raw.trim();
+  // Closed think/thought/thinking tags
+  text = text.replace(/<\s*(?:think|thought|thinking)(?:\s+[^>]*)?>[\s\S]*?<\s*\/\s*(?:think|thought|thinking)\s*>/gi, '').trim();
+  // Orphaned closing tag at start
+  text = text.replace(/^[\s\S]*?<\s*\/\s*(?:think|thought|thinking)\s*>/i, '').trim();
+  // Orphaned opening tag at end
+  text = text.replace(/<\s*(?:think|thought|thinking)(?:\s+[^>]*)?>[\s\S]*$/i, '').trim();
+  // Details tag
+  text = text.replace(/<\s*details(?:\s+[^>]*)?>[\s\S]*?<\s*\/\s*details\s*>/gi, '').trim();
+  // Markdown code block full match
+  const codeblockMatch = text.match(/^```[a-zA-Z0-9_-]*\s*\n([\s\S]*?)\n```$/);
+  if (codeblockMatch) {
+    text = codeblockMatch[1].trim();
+  } else if (text.startsWith('```') && text.endsWith('```')) {
+    const lines = text.split('\n');
+    if (lines.length >= 2) {
+      text = lines.slice(1, -1).join('\n').trim();
+    }
+  } else {
+    const embeddedMatch = text.match(/```[a-zA-Z0-9_-]*\s*\n([\s\S]*?)\n```/);
+    if (embeddedMatch && (text.toLowerCase().startsWith('here is') || text.toLowerCase().startsWith('prompt:'))) {
+      text = embeddedMatch[1].trim();
+    }
+  }
+  // Re-run closed tags in case inside code fence
+  text = text.replace(/<\s*(?:think|thought|thinking)(?:\s+[^>]*)?>[\s\S]*?<\s*\/\s*(?:think|thought|thinking)\s*>/gi, '').trim();
+  return text;
+}
+
+export function extractInlineThinking(raw: string): string {
+  if (!raw) return '';
+  const thoughts: string[] = [];
+  const tagRegex = /<\s*(?:think|thought|thinking)(?:\s+[^>]*)?>([\s\S]*?)<\s*\/\s*(?:think|thought|thinking)\s*>/gi;
+  let remaining = raw.replace(tagRegex, (_match, th) => {
+    if (th && th.trim()) thoughts.push(th.trim());
+    return '';
+  });
+
+  const orphanedClose = remaining.match(/^([\s\S]*?)<\s*\/\s*(?:think|thought|thinking)\s*>/i);
+  if (orphanedClose && orphanedClose[1].trim()) {
+    thoughts.push(orphanedClose[1].trim());
+    remaining = remaining.slice(orphanedClose[0].length);
+  }
+
+  const orphanedOpen = remaining.match(/<\s*(?:think|thought|thinking)(?:\s+[^>]*)?>([\s\S]*)$/i);
+  if (orphanedOpen && orphanedOpen[1].trim()) {
+    thoughts.push(orphanedOpen[1].trim());
+  }
+
+  return thoughts.join('\n\n');
+}
+
 export const MessageCard: React.FC<MessageCardProps> = ({ message, isStreaming = false }) => {
   const [copied, setCopied] = useState(false);
   const [showThinking, setShowThinking] = useState(false);
 
   const isAssistant = message.role === 'assistant';
+  const displayContent = isAssistant ? cleanPromptText(message.content || '') : (message.content || '');
+  const thinkingContent = (message.thinking && message.thinking.trim()) || (isAssistant ? extractInlineThinking(message.content || '') : '');
 
   const handleCopy = async () => {
-    if (!message.content) return;
+    const textToCopy = isAssistant ? cleanPromptText(message.content || '') : (message.content || '');
+    if (!textToCopy) return;
     try {
-      let textToCopy = message.content.trim();
-      textToCopy = textToCopy.replace(/<(?:think|thought)>[\s\S]*?<\/(?:think|thought)>\s*/gi, '').trim();
-      const codeblockMatch = textToCopy.match(/^```[a-zA-Z0-9_-]*\s*\n([\s\S]*?)\n```$/);
-      if (codeblockMatch) {
-        textToCopy = codeblockMatch[1].trim();
-      } else if (textToCopy.startsWith('```') && textToCopy.endsWith('```')) {
-        const lines = textToCopy.split('\n');
-        if (lines.length >= 2) {
-          textToCopy = lines.slice(1, -1).join('\n').trim();
-        }
-      }
       await navigator.clipboard.writeText(textToCopy);
       // Trigger short haptic feedback on iOS/Android if supported
       if (typeof navigator !== 'undefined' && navigator.vibrate) {
@@ -39,8 +85,8 @@ export const MessageCard: React.FC<MessageCardProps> = ({ message, isStreaming =
     }
   };
 
-  const wordCount = message.content ? message.content.trim().split(/\s+/).length : 0;
-  const charCount = message.content ? message.content.length : 0;
+  const wordCount = displayContent ? displayContent.trim().split(/\s+/).length : 0;
+  const charCount = displayContent ? displayContent.length : 0;
 
   if (!isAssistant) {
     // User message card
@@ -83,7 +129,7 @@ export const MessageCard: React.FC<MessageCardProps> = ({ message, isStreaming =
           <button
             type="button"
             onClick={handleCopy}
-            disabled={!message.content}
+            disabled={!displayContent}
             className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold tracking-tight transition-all active:scale-95 ${
               copied
                 ? 'bg-zinc-100 text-black border border-white'
@@ -106,7 +152,7 @@ export const MessageCard: React.FC<MessageCardProps> = ({ message, isStreaming =
         </div>
 
         {/* Optional Collapsible Reasoning Drawer */}
-        {message.thinking && (
+        {thinkingContent ? (
           <div className="border-b border-zinc-900 bg-black/40">
             <button
               type="button"
@@ -125,17 +171,17 @@ export const MessageCard: React.FC<MessageCardProps> = ({ message, isStreaming =
             </button>
             {showThinking && (
               <div className="px-4 py-2.5 text-xs text-zinc-400 font-mono leading-relaxed bg-black/70 border-t border-zinc-900 whitespace-pre-wrap max-h-48 overflow-y-auto select-text">
-                {message.thinking}
+                {thinkingContent}
               </div>
             )}
           </div>
-        )}
+        ) : null}
 
         {/* Pure Prompt Content Display */}
         <div className="p-4 sm:p-5 select-text">
-          {message.content ? (
+          {displayContent ? (
             <p className="text-sm sm:text-base leading-relaxed text-zinc-100 whitespace-pre-wrap font-normal selection:bg-zinc-800 selection:text-white">
-              {message.content}
+              {displayContent}
             </p>
           ) : isStreaming ? (
             <div className="flex items-center gap-2 py-2 text-zinc-500 text-xs font-mono">

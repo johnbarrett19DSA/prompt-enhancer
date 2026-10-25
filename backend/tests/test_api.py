@@ -245,5 +245,65 @@ class PromptForgeBackendTests(unittest.TestCase):
         self.assertIn("Step 1: Composition", saved_msg["thinking"])
         self.assertIn("Step 2: Lighting", saved_msg["thinking"])
 
+    def test_15_orphaned_close_and_open_thinking_tags(self):
+        create_res = self.client.post("/api/sessions", json={"title": "Orphaned Tags Test"})
+        session_id = create_res.json()["id"]
+
+        # Orphaned closing tag (model began generating from within think block without <think>)
+        orphaned_close_content = "Analyzing 85mm lens characteristics and dusk bokeh</think>A candid shot of a barista in neon rain"
+        asyncio.run(save_assistant_message(session_id, "orphan-close-1", orphaned_close_content, 1234573))
+
+        get_res = self.client.get(f"/api/sessions/{session_id}")
+        saved_msg = get_res.json()["messages"][0]
+        self.assertEqual(saved_msg["content"], "A candid shot of a barista in neon rain")
+        self.assertEqual(saved_msg["thinking"], "Analyzing 85mm lens characteristics and dusk bokeh")
+
+        # <thinking> variant with whitespace
+        thinking_variant = "<thinking >Optical subsurface scattering details</thinking >Macro water droplet reflecting neon lights"
+        asyncio.run(save_assistant_message(session_id, "variant-msg-1", thinking_variant, 1234574))
+        get_res2 = self.client.get(f"/api/sessions/{session_id}")
+        saved_msg2 = get_res2.json()["messages"][1]
+        self.assertEqual(saved_msg2["content"], "Macro water droplet reflecting neon lights")
+        self.assertEqual(saved_msg2["thinking"], "Optical subsurface scattering details")
+
+    def test_16_stream_think_parser(self):
+        from backend.app.routes.sessions import StreamThinkParser
+        parser = StreamThinkParser()
+
+        # Simulate split chunks across network boundaries
+        chunks = [
+            "<th", "ink>", "Planning composition...", " and lighting", "</thi", "nk>\n\nA cinematic", " street scene"
+        ]
+        events = []
+        for c in chunks:
+            events.extend(parser.process_chunk(c))
+        events.extend(parser.flush())
+
+        thinking_text = "".join(text for ev_type, text in events if ev_type == "thinking")
+        content_text = "".join(text for ev_type, text in events if ev_type == "content")
+
+        self.assertEqual(thinking_text, "Planning composition... and lighting")
+        self.assertEqual(content_text.strip(), "A cinematic street scene")
+
+    def test_17_preamble_embedded_codeblock(self):
+        create_res = self.client.post("/api/sessions", json={"title": "Preamble Codeblock Test"})
+        session_id = create_res.json()["id"]
+
+        preamble_content = "Here is the prompt:\n```markdown\nA cyberpunk cityscape at night with volumetric fog\n```"
+        asyncio.run(save_assistant_message(session_id, "preamble-msg-1", preamble_content, 1234575))
+
+        get_res = self.client.get(f"/api/sessions/{session_id}")
+        saved_msg = get_res.json()["messages"][0]
+        self.assertEqual(saved_msg["content"], "A cyberpunk cityscape at night with volumetric fog")
+
+    def test_18_model_metadata_sync(self):
+        from backend.app.models_store import _load_config_sync
+        cfg = _load_config_sync()
+        deepseek_model = next((m for m in cfg.models if m.id == "deepseek/deepseek-v4.1-flash-1017:thinking"), None)
+        self.assertIsNotNone(deepseek_model)
+        self.assertEqual(deepseek_model.name, "DeepSeek V4.1 Flash (Thinking)")
+        self.assertEqual(deepseek_model.description, "Ultra-fast reasoning model with thinking capabilities")
+        self.assertTrue(deepseek_model.supports_thinking)
+
 if __name__ == "__main__":
     unittest.main()

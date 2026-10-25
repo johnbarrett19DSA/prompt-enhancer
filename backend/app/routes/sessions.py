@@ -193,10 +193,82 @@ async def update_session(session_id: str, payload: UpdateSessionRequest):
         "updated_at": row["updated_at"]
     }
 
+class StreamThinkParser:
+    """
+    Stateful streaming parser that inspects content deltas in real-time.
+    Routes inline <think>, <thought>, or <thinking> text to 'thinking' events,
+    and actual prompt generation text to 'content' events, preventing think tags
+    from leaking into the prompt display while streaming.
+    """
+    def __init__(self):
+        self.in_think = False
+        self.pending = ""
+
+    def process_chunk(self, chunk: str) -> List[tuple[str, str]]:
+        text = self.pending + chunk
+        self.pending = ""
+        events: List[tuple[str, str]] = []
+
+        while text:
+            if not self.in_think:
+                # Look for opening think tag
+                m = re.search(r"<\s*(?:think|thought|thinking)(?:\s+[^>]*)?>", text, re.IGNORECASE)
+                if m:
+                    content_part = text[:m.start()]
+                    if content_part:
+                        events.append(("content", content_part))
+                    self.in_think = True
+                    text = text[m.end():]
+                else:
+                    # Look for potential partial opening tag at the end (e.g. "<", "<th", "<think")
+                    partial_m = re.search(r"<\s*(?:t(?:h(?:i(?:n(?:k(?:i(?:n(?:g)?)?)?)?)?)?)?)?$", text, re.IGNORECASE)
+                    if partial_m and partial_m.start() > 0:
+                        events.append(("content", text[:partial_m.start()]))
+                        self.pending = text[partial_m.start():]
+                        text = ""
+                    elif partial_m and partial_m.start() == 0:
+                        self.pending = text
+                        text = ""
+                    else:
+                        events.append(("content", text))
+                        text = ""
+            else:
+                # Inside think tag, look for closing tag
+                m = re.search(r"<\s*\/\s*(?:think|thought|thinking)\s*>", text, re.IGNORECASE)
+                if m:
+                    think_part = text[:m.start()]
+                    if think_part:
+                        events.append(("thinking", think_part))
+                    self.in_think = False
+                    text = text[m.end():]
+                else:
+                    # Look for partial closing tag at the end
+                    partial_m = re.search(r"<\s*\/\s*(?:t(?:h(?:i(?:n(?:k(?:i(?:n(?:g)?)?)?)?)?)?)?)?$", text, re.IGNORECASE)
+                    if partial_m and partial_m.start() > 0:
+                        events.append(("thinking", text[:partial_m.start()]))
+                        self.pending = text[partial_m.start():]
+                        text = ""
+                    elif partial_m and partial_m.start() == 0:
+                        self.pending = text
+                        text = ""
+                    else:
+                        events.append(("thinking", text))
+                        text = ""
+        return events
+
+    def flush(self) -> List[tuple[str, str]]:
+        events: List[tuple[str, str]] = []
+        if self.pending:
+            target = "thinking" if self.in_think else "content"
+            events.append((target, self.pending))
+            self.pending = ""
+        return events
+
 def clean_prompt_and_thinking(content: str, thinking: str = "") -> tuple[str, str]:
     """
-    Extracts any inline thinking/thought tags (<think>...</think>, <thought>...</thought>),
-    strips enclosing markdown code blocks (e.g. ```markdown ... ``` or ```text ... ```),
+    Extracts any inline thinking/thought tags (<think>...</think>, <thought>...</thought>, <thinking>...</thinking>),
+    including unclosed or orphaned closing tags and <details> tags.
+    Strips enclosing markdown code blocks (e.g. ```markdown ... ``` or ```text ... ```),
     and returns (cleaned_prompt, combined_thinking).
     """
     if not content:
@@ -205,48 +277,81 @@ def clean_prompt_and_thinking(content: str, thinking: str = "") -> tuple[str, st
     cleaned = content.strip()
     extracted_thoughts: List[str] = []
 
-    def replace_think(m: re.Match) -> str:
-        th = m.group(1).strip()
+    def extract_and_remove_tag(match: re.Match) -> str:
+        th = match.group(1).strip()
         if th:
             extracted_thoughts.append(th)
         return ""
 
-    # Extract closed <think>...</think> or <thought>...</thought> tags
-    cleaned = re.sub(r"<(?:think|thought)>([\s\S]*?)<\/(?:think|thought)>", replace_think, cleaned, flags=re.IGNORECASE).strip()
+    # 1. Closed tags: <think>...</think>, <thought>...</thought>, <thinking>...</thinking>
+    tag_regex = re.compile(
+        r"<\s*(?:think|thought|thinking)(?:\s+[^>]*)?>([\s\S]*?)<\s*\/\s*(?:think|thought|thinking)\s*>",
+        re.IGNORECASE
+    )
+    cleaned = tag_regex.sub(extract_and_remove_tag, cleaned).strip()
 
-    # If there is an unclosed <think> or <thought> tag at the end (e.g. truncated)
-    if re.search(r"<(?:think|thought)>", cleaned, re.IGNORECASE):
-        unclosed_match = re.search(r"<(?:think|thought)>([\s\S]*)$", cleaned, re.IGNORECASE)
-        if unclosed_match:
-            th = unclosed_match.group(1).strip()
-            if th:
-                extracted_thoughts.append(th)
-        cleaned = re.sub(r"<(?:think|thought)>[\s\S]*$", "", cleaned, flags=re.IGNORECASE).strip()
+    # 2. Orphaned closing tag at start: e.g. "Some reasoning...</think> Actual prompt"
+    orphaned_close_regex = re.compile(
+        r"^([\s\S]*?)<\s*\/\s*(?:think|thought|thinking)\s*>",
+        re.IGNORECASE
+    )
+    close_m = orphaned_close_regex.search(cleaned)
+    if close_m:
+        th = close_m.group(1).strip()
+        if th:
+            extracted_thoughts.append(th)
+        cleaned = cleaned[close_m.end():].strip()
 
-    # Strip any enclosing markdown code block
-    codeblock_match = re.match(r"^```[a-zA-Z0-9_-]*\s*\n([\s\S]*?)\n```$", cleaned)
-    if codeblock_match:
-        cleaned = codeblock_match.group(1).strip()
+    # 3. Orphaned opening tag: e.g. "Prompt <think> Unfinished reasoning..."
+    orphaned_open_regex = re.compile(
+        r"<\s*(?:think|thought|thinking)(?:\s+[^>]*)?>([\s\S]*)$",
+        re.IGNORECASE
+    )
+    open_m = orphaned_open_regex.search(cleaned)
+    if open_m:
+        th = open_m.group(1).strip()
+        if th:
+            extracted_thoughts.append(th)
+        cleaned = cleaned[:open_m.start()].strip()
+
+    # 4. Strip <details> thinking blocks if present: <details...><summary>...</summary>...</details>
+    details_regex = re.compile(
+        r"<\s*details(?:\s+[^>]*)?>[\s\S]*?<\s*\/\s*details\s*>",
+        re.IGNORECASE
+    )
+    cleaned = details_regex.sub("", cleaned).strip()
+
+    # 5. Extract prompt from enclosing markdown code block if present
+    codeblock_full = re.match(r"^```[a-zA-Z0-9_-]*\s*\n([\s\S]*?)\n```$", cleaned)
+    if codeblock_full:
+        cleaned = codeblock_full.group(1).strip()
     elif cleaned.startswith("```") and cleaned.endswith("```"):
         lines = cleaned.splitlines()
         if len(lines) >= 2:
             cleaned = "\n".join(lines[1:-1]).strip()
+    else:
+        embedded_cb = re.search(r"```[a-zA-Z0-9_-]*\s*\n([\s\S]*?)\n```", cleaned)
+        if embedded_cb and (cleaned.lower().startswith("here is") or cleaned.lower().startswith("prompt:") or cleaned.lower().startswith("enhanced prompt:")):
+            cleaned = embedded_cb.group(1).strip()
 
-    # Re-check in case think tag was inside a code block or vice versa
-    cleaned = re.sub(r"<(?:think|thought)>([\s\S]*?)<\/(?:think|thought)>", replace_think, cleaned, flags=re.IGNORECASE).strip()
-    codeblock_match2 = re.match(r"^```[a-zA-Z0-9_-]*\s*\n([\s\S]*?)\n```$", cleaned)
-    if codeblock_match2:
-        cleaned = codeblock_match2.group(1).strip()
+    # 6. Re-run tag check in case think tags were inside the code block
+    cleaned = tag_regex.sub(extract_and_remove_tag, cleaned).strip()
 
-    # Normalize whitespace artifacts (e.g. multiple spaces created by removed inline tags)
+    # 7. Normalize whitespace
     cleaned = re.sub(r"[ \t]+", " ", cleaned)
+    cleaned = re.sub(r"\n\s*\n\s*\n+", "\n\n", cleaned)
     cleaned = re.sub(r" ?\n ?", "\n", cleaned).strip()
 
-    combined_thinking = thinking or ""
-    if extracted_thoughts:
-        more_thinking = "\n\n".join(extracted_thoughts)
-        combined_thinking = f"{combined_thinking}\n\n{more_thinking}".strip() if combined_thinking else more_thinking
+    # 8. Merge thinking
+    combined_parts = []
+    if thinking and thinking.strip():
+        combined_parts.append(thinking.strip())
+    for t in extracted_thoughts:
+        t_clean = t.strip()
+        if t_clean and t_clean not in combined_parts:
+            combined_parts.append(t_clean)
 
+    combined_thinking = "\n\n".join(combined_parts)
     return cleaned, combined_thinking
 
 async def save_assistant_message(session_id: str, msg_id: str, content: str, created_at: int, thinking: str = ""):
@@ -349,6 +454,7 @@ async def chat_stream(session_id: str, payload: ChatRequest, request: Request):
     async def fetch_upstream_and_persist():
         buffer_content = []
         buffer_thinking = []
+        stream_parser = StreamThinkParser()
         target_url = f"{NANOGPT_BASE_URL}/chat/completions"
         headers = {
             "Authorization": f"Bearer {NANOGPT_API_KEY}",
@@ -387,6 +493,11 @@ async def chat_stream(session_id: str, payload: ChatRequest, request: Request):
 
                                 # Extract reasoning / thinking delta if present
                                 reasoning_delta = delta.get("reasoning") or delta.get("reasoning_content") or ""
+                                if not reasoning_delta and delta.get("reasoning_details"):
+                                    details = delta.get("reasoning_details")
+                                    if isinstance(details, list):
+                                        reasoning_delta = "".join(d.get("text", "") for d in details if isinstance(d, dict))
+
                                 if reasoning_delta:
                                     buffer_thinking.append(reasoning_delta)
                                     await queue.put({
@@ -394,16 +505,39 @@ async def chat_stream(session_id: str, payload: ChatRequest, request: Request):
                                         "delta": reasoning_delta
                                     })
 
-                                # Extract prompt content delta
+                                # Extract prompt content delta and route inline thinking if present
                                 content_delta = delta.get("content") or ""
                                 if content_delta:
-                                    buffer_content.append(content_delta)
-                                    await queue.put({
-                                        "type": "content",
-                                        "delta": content_delta
-                                    })
+                                    for ev_type, ev_text in stream_parser.process_chunk(content_delta):
+                                        if ev_type == "thinking":
+                                            buffer_thinking.append(ev_text)
+                                            await queue.put({
+                                                "type": "thinking",
+                                                "delta": ev_text
+                                            })
+                                        else:
+                                            buffer_content.append(ev_text)
+                                            await queue.put({
+                                                "type": "content",
+                                                "delta": ev_text
+                                            })
                             except Exception:
                                 pass
+
+                    # Flush any remaining parser buffer
+                    for ev_type, ev_text in stream_parser.flush():
+                        if ev_type == "thinking":
+                            buffer_thinking.append(ev_text)
+                            await queue.put({
+                                "type": "thinking",
+                                "delta": ev_text
+                            })
+                        else:
+                            buffer_content.append(ev_text)
+                            await queue.put({
+                                "type": "content",
+                                "delta": ev_text
+                            })
         except Exception as e:
             upstream_error = f"Upstream connection failure: {str(e)}"
             await queue.put({

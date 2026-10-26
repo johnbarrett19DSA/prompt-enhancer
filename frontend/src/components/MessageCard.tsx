@@ -5,6 +5,7 @@ import { Message } from '../types';
 interface MessageCardProps {
   message: Message;
   isStreaming?: boolean;
+  isCatchingUp?: boolean;
 }
 
 export function cleanPromptText(raw: string): string {
@@ -61,8 +62,13 @@ export function extractInlineThinking(raw: string): string {
   return thoughts.join('\n\n');
 }
 
-export const MessageCard: React.FC<MessageCardProps> = ({ message, isStreaming = false }) => {
+export const MessageCard: React.FC<MessageCardProps> = ({
+  message,
+  isStreaming = false,
+  isCatchingUp = false,
+}) => {
   const [copied, setCopied] = useState(false);
+  const [userCopied, setUserCopied] = useState(false);
   const [showThinking, setShowThinking] = useState(false);
 
   const isAssistant = message.role === 'assistant';
@@ -85,17 +91,55 @@ export const MessageCard: React.FC<MessageCardProps> = ({ message, isStreaming =
     }
   };
 
+  const handleCopyUser = async () => {
+    if (!message.content) return;
+    try {
+      await navigator.clipboard.writeText(message.content);
+      if (typeof navigator !== 'undefined' && navigator.vibrate) {
+        navigator.vibrate([15]);
+      }
+      setUserCopied(true);
+      setTimeout(() => setUserCopied(false), 2000);
+    } catch (err) {
+      console.error('User input copy failed:', err);
+    }
+  };
+
   const wordCount = displayContent ? displayContent.trim().split(/\s+/).length : 0;
   const charCount = displayContent ? displayContent.length : 0;
 
   if (!isAssistant) {
-    // User message card
+    // User message card with 1-tap copy button
     return (
       <div className="flex justify-end mb-4 animate-in fade-in duration-150">
         <div className="max-w-[88%] sm:max-w-[80%] rounded-2xl bg-zinc-900 border border-zinc-800/80 px-4 py-3 text-zinc-100 shadow-sm">
-          <div className="flex items-center gap-1.5 mb-1.5 text-[10px] uppercase font-semibold tracking-wider text-zinc-500">
-            <User className="w-3 h-3 text-zinc-500" />
-            <span>Iteration Request</span>
+          <div className="flex items-center justify-between gap-3 mb-1.5 text-[10px] uppercase font-semibold tracking-wider text-zinc-500">
+            <div className="flex items-center gap-1.5">
+              <User className="w-3 h-3 text-zinc-500" />
+              <span>Iteration Request</span>
+            </div>
+            <button
+              type="button"
+              onClick={handleCopyUser}
+              className={`flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium tracking-normal transition-all active:scale-95 ${
+                userCopied
+                  ? 'bg-zinc-800 text-zinc-200'
+                  : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/60'
+              }`}
+              aria-label="Copy input to clipboard"
+            >
+              {userCopied ? (
+                <>
+                  <Check className="w-3 h-3 stroke-[2.5] text-zinc-300" />
+                  <span>Copied</span>
+                </>
+              ) : (
+                <>
+                  <Copy className="w-3 h-3 stroke-[1.75]" />
+                  <span>Copy</span>
+                </>
+              )}
+            </button>
           </div>
           <div className="text-sm leading-relaxed whitespace-pre-wrap select-text text-zinc-200">
             {message.content}
@@ -180,9 +224,22 @@ export const MessageCard: React.FC<MessageCardProps> = ({ message, isStreaming =
         {/* Pure Prompt Content Display */}
         <div className="p-4 sm:p-5 select-text">
           {displayContent ? (
-            <p className="text-sm sm:text-base leading-relaxed text-zinc-100 whitespace-pre-wrap font-normal selection:bg-zinc-800 selection:text-white">
-              {displayContent}
-            </p>
+            <>
+              <p className="text-sm sm:text-base leading-relaxed text-zinc-100 whitespace-pre-wrap font-normal selection:bg-zinc-800 selection:text-white">
+                {displayContent}
+              </p>
+              {isCatchingUp && (
+                <div className="mt-3 pt-2.5 border-t border-zinc-900/80 flex items-center gap-2 text-zinc-400 text-xs font-mono">
+                  <span className="w-2 h-2 rounded-full bg-zinc-400 animate-ping" />
+                  <span>Completing generation on server...</span>
+                </div>
+              )}
+            </>
+          ) : isCatchingUp ? (
+            <div className="flex items-center gap-2 py-2 text-zinc-400 text-xs font-mono">
+              <span className="w-2 h-2 rounded-full bg-zinc-400 animate-ping" />
+              <span>Completing generation on server...</span>
+            </div>
           ) : isStreaming ? (
             <div className="flex items-center gap-2 py-2 text-zinc-500 text-xs font-mono">
               <span className="w-2 h-2 rounded-full bg-zinc-400 animate-ping" />

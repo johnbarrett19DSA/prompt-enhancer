@@ -305,5 +305,39 @@ class PromptForgeBackendTests(unittest.TestCase):
         self.assertEqual(deepseek_model.description, "Ultra-fast reasoning model with thinking capabilities")
         self.assertTrue(deepseek_model.supports_thinking)
 
+    def test_19_session_recovery_and_catchup_flow(self):
+        # Create session
+        create_res = self.client.post("/api/sessions", json={"title": "Recovery Flow Test"})
+        session_id = create_res.json()["id"]
+
+        # Simulate user submitting message directly into DB as chat_stream does
+        async def insert_user_msg():
+            async with get_db() as db:
+                await db.execute(
+                    "INSERT INTO messages (id, session_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)",
+                    ("user-msg-1", session_id, "user", "Create an oil painting of a lighthouse in a storm", 1234576)
+                )
+                await db.commit()
+        asyncio.run(insert_user_msg())
+
+        # Verify session endpoint returns the user message
+        sess_res1 = self.client.get(f"/api/sessions/{session_id}")
+        self.assertEqual(sess_res1.status_code, 200)
+        msgs1 = sess_res1.json()["messages"]
+        self.assertEqual(len(msgs1), 1)
+        self.assertEqual(msgs1[0]["role"], "user")
+
+        # Now simulate backend completing the assistant generation in the background
+        asyncio.run(save_assistant_message(session_id, "asst-msg-1", "<think>Dramatic waves crashing</think>A dramatic oil painting of a lighthouse during a violent sea storm", 1234577))
+
+        # Re-fetch session (catch-up polling simulation)
+        sess_res2 = self.client.get(f"/api/sessions/{session_id}")
+        self.assertEqual(sess_res2.status_code, 200)
+        msgs2 = sess_res2.json()["messages"]
+        self.assertEqual(len(msgs2), 2)
+        self.assertEqual(msgs2[1]["role"], "assistant")
+        self.assertEqual(msgs2[1]["content"], "A dramatic oil painting of a lighthouse during a violent sea storm")
+        self.assertEqual(msgs2[1]["thinking"], "Dramatic waves crashing")
+
 if __name__ == "__main__":
     unittest.main()

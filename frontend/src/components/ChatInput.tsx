@@ -8,6 +8,7 @@ interface ChatInputProps {
   onSendMessage: (message: string) => void;
   onStopStreaming: () => void;
   isStreaming: boolean;
+  isCatchingUp?: boolean;
   disabled?: boolean;
   sessionId?: string | null;
 }
@@ -16,6 +17,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   onSendMessage,
   onStopStreaming,
   isStreaming,
+  isCatchingUp = false,
   disabled = false,
   sessionId = null,
 }) => {
@@ -89,7 +91,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
 
   const handleSubmit = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    if (isStreaming) {
+    if (isStreaming || isCatchingUp) {
       onStopStreaming();
       return;
     }
@@ -126,7 +128,9 @@ export const ChatInput: React.FC<ChatInputProps> = ({
             onChange={handleChange}
             onKeyDown={handleKeyDown}
             placeholder={
-              isStreaming
+              isCatchingUp
+                ? "Completing generation on server..."
+                : isStreaming
                 ? "Streaming response..."
                 : "Instruct prompt architect or refine iteration..."
             }
@@ -134,7 +138,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
             className="flex-1 bg-transparent px-3 py-1.5 text-zinc-100 placeholder-zinc-500 text-base resize-none focus:outline-none max-h-36 leading-normal select-text"
           />
 
-          {isStreaming ? (
+          {isStreaming || isCatchingUp ? (
             <button
               type="button"
               onClick={onStopStreaming}

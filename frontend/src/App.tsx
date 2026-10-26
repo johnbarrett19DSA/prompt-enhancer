@@ -39,11 +39,21 @@ export function App() {
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
   const [isModelModalOpen, setIsModelModalOpen] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
+  const [isCatchingUp, setIsCatchingUp] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [streamingError, setStreamingError] = useState<string | null>(null);
 
   const abortControllerRef = useRef<AbortController | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Synchronous status refs for event listeners and background callbacks
+  const isStreamingRef = useRef(false);
+  isStreamingRef.current = isStreaming;
+  const isCatchingUpRef = useRef(false);
+  isCatchingUpRef.current = isCatchingUp;
+  const currentSessionIdRef = useRef(currentSessionId);
+  currentSessionIdRef.current = currentSessionId;
 
   const stopPolling = useCallback(() => {
     if (pollIntervalRef.current) {
@@ -68,59 +78,88 @@ export function App() {
     messagesEndRef.current?.scrollIntoView({ behavior, block: 'end' });
   }, []);
 
+  // Start catch-up polling when stream is interrupted, disconnected, or app rehydrated
+  const startCatchUp = useCallback((sessionIdToCheck: string, expectedAfterTime?: number) => {
+    stopPolling();
+    setIsCatchingUp(true);
+    setIsStreaming(true);
+    setStreamingError(null);
+
+    // If last message in local state is user, append placeholder assistant message
+    setMessages((prev) => {
+      const last = prev.length > 0 ? prev[prev.length - 1] : null;
+      if (last && last.role === 'user') {
+        return [
+          ...prev,
+          {
+            id: `catchup-${last.id}`,
+            session_id: sessionIdToCheck,
+            role: 'assistant',
+            content: '',
+            thinking: '',
+            created_at: Date.now(),
+          },
+        ];
+      }
+      return prev;
+    });
+
+    let attempts = 0;
+    const maxAttempts = 40; // 40 * 1.5s = 60s
+    const pollInterval = 1500;
+
+    const pollStep = async () => {
+      attempts++;
+      try {
+        const freshData = await api.fetchSession(sessionIdToCheck);
+        const freshMsgs = freshData.messages || [];
+        const freshLast = freshMsgs.length > 0 ? freshMsgs[freshMsgs.length - 1] : null;
+
+        // Condition for completion: assistant message is committed in SQLite
+        const isCompleted =
+          freshLast &&
+          freshLast.role === 'assistant' &&
+          (freshLast.content.trim().length > 0 || (expectedAfterTime ? freshLast.created_at >= expectedAfterTime : true));
+
+        if (isCompleted) {
+          stopPolling();
+          setMessages(freshMsgs);
+          setIsStreaming(false);
+          setIsCatchingUp(false);
+          const updatedSessions = await api.fetchSessions();
+          setSessions(updatedSessions);
+          setTimeout(() => scrollToBottom('smooth'), 50);
+          return;
+        }
+
+        if (attempts >= maxAttempts) {
+          stopPolling();
+          setIsStreaming(false);
+          setIsCatchingUp(false);
+          setStreamingError('Prompt generation timed out on server. Tap refresh to check again.');
+        }
+      } catch {
+        if (attempts >= maxAttempts) {
+          stopPolling();
+          setIsStreaming(false);
+          setIsCatchingUp(false);
+        }
+      }
+    };
+
+    // First check immediately, then poll every 1.5s
+    pollStep();
+    pollIntervalRef.current = setInterval(pollStep, pollInterval);
+  }, [stopPolling, scrollToBottom]);
+
   // Check if server completed an assistant generation while client was dropped or disconnected
   const checkPendingGeneration = useCallback((sessionIdToCheck: string, initialMsgs: Message[]) => {
-    stopPolling();
     const lastMsg = initialMsgs && initialMsgs.length > 0 ? initialMsgs[initialMsgs.length - 1] : null;
     // If last message is from user and was submitted recently (< 150 seconds ago), poll for completion
     if (lastMsg && lastMsg.role === 'user' && (Date.now() - lastMsg.created_at) < 150000) {
-      setIsStreaming(true);
-      setMessages((prev) => {
-        const last = prev.length > 0 ? prev[prev.length - 1] : null;
-        if (last && last.role === 'user') {
-          return [
-            ...prev,
-            {
-              id: `pending-${last.id}`,
-              session_id: sessionIdToCheck,
-              role: 'assistant',
-              content: '',
-              thinking: 'Recovering prompt architect generation from server...',
-              created_at: Date.now(),
-            },
-          ];
-        }
-        return prev;
-      });
-
-      let attempts = 0;
-      pollIntervalRef.current = setInterval(async () => {
-        attempts++;
-        try {
-          const freshData = await api.fetchSession(sessionIdToCheck);
-          const freshMsgs = freshData.messages || [];
-          const freshLast = freshMsgs.length > 0 ? freshMsgs[freshMsgs.length - 1] : null;
-          if (freshLast && freshLast.role === 'assistant') {
-            stopPolling();
-            setMessages(freshMsgs);
-            setIsStreaming(false);
-            const updatedSessions = await api.fetchSessions();
-            setSessions(updatedSessions);
-            setTimeout(() => scrollToBottom('smooth'), 50);
-          } else if (attempts >= 25) {
-            stopPolling();
-            setIsStreaming(false);
-            setStreamingError('Prompt generation timed out or was interrupted. You can resubmit.');
-          }
-        } catch {
-          if (attempts >= 25) {
-            stopPolling();
-            setIsStreaming(false);
-          }
-        }
-      }, 2000);
+      startCatchUp(sessionIdToCheck, lastMsg.created_at);
     }
-  }, [stopPolling, scrollToBottom]);
+  }, [startCatchUp]);
 
   // Load a session by ID
   const loadSession = useCallback(async (id: string, configFallback?: ModelsConfig | null) => {
@@ -220,14 +259,52 @@ export function App() {
 
   // Handle tab wake-up / iOS PWA resume rehydration
   useEffect(() => {
-    const handleRehydrate = () => {
-      if (document.visibilityState === 'visible' && currentSessionId) {
-        // If an SSE stream is actively receiving data, do not clobber it; otherwise reload session to fetch completed server prompt
-        if (!abortControllerRef.current) {
-          loadSession(currentSessionId);
-        }
+    const handleRehydrate = async () => {
+      const sessId = currentSessionIdRef.current;
+      if (document.visibilityState !== 'visible' || !sessId) {
+        return;
       }
+
+      // If an active stream or catch-up was in flight when iOS backgrounded the app
+      if (abortControllerRef.current || isStreamingRef.current || isCatchingUpRef.current) {
+        try {
+          const freshData = await api.fetchSession(sessId);
+          const freshMsgs = freshData.messages || [];
+          const freshLast = freshMsgs.length > 0 ? freshMsgs[freshMsgs.length - 1] : null;
+
+          if (freshLast && freshLast.role === 'assistant' && freshLast.content.trim().length > 0) {
+            // Already completed in SQLite while app was backgrounded!
+            if (abortControllerRef.current) {
+              abortControllerRef.current.abort();
+              abortControllerRef.current = null;
+            }
+            stopPolling();
+            setMessages(freshMsgs);
+            setIsStreaming(false);
+            setIsCatchingUp(false);
+            setStreamingError(null);
+            const updatedSessions = await api.fetchSessions();
+            setSessions(updatedSessions);
+            setTimeout(() => scrollToBottom('smooth'), 50);
+            return;
+          }
+        } catch (e) {
+          console.warn('Rehydration session fetch check failed:', e);
+        }
+
+        // Generation still underway in backend: abort broken stream socket and start catch-up polling
+        if (abortControllerRef.current) {
+          abortControllerRef.current.abort();
+          abortControllerRef.current = null;
+        }
+        startCatchUp(sessId);
+        return;
+      }
+
+      // If not streaming, regular rehydrate
+      loadSession(sessId);
     };
+
     document.addEventListener('visibilitychange', handleRehydrate);
     window.addEventListener('pageshow', handleRehydrate);
     return () => {
@@ -235,7 +312,7 @@ export function App() {
       window.removeEventListener('pageshow', handleRehydrate);
       stopPolling();
     };
-  }, [currentSessionId, loadSession, stopPolling]);
+  }, [loadSession, startCatchUp, stopPolling, scrollToBottom]);
 
   // Switch model and sync with backend session
   const handleSelectModel = async (modelId: string) => {
@@ -302,6 +379,8 @@ export function App() {
       setSessions(remaining);
       if (currentSessionId === id) {
         stopPolling();
+        setIsStreaming(false);
+        setIsCatchingUp(false);
         if (remaining.length > 0) {
           await loadSession(remaining[0].id);
         } else {
@@ -350,10 +429,13 @@ export function App() {
 
     setMessages((prev) => [...prev, userMessage, pendingAssistantMessage]);
     setIsStreaming(true);
+    setIsCatchingUp(false);
     setTimeout(() => scrollToBottom('smooth'), 50);
 
     const abortController = new AbortController();
     abortControllerRef.current = abortController;
+
+    let streamCompletedNormally = false;
 
     try {
       await api.streamChat(
@@ -397,6 +479,7 @@ export function App() {
           }
 
           if (chunk.type === 'done') {
+            streamCompletedNormally = true;
             if (chunk.id && chunk.content !== undefined) {
               setMessages((prev) => {
                 const last = prev[prev.length - 1];
@@ -419,26 +502,80 @@ export function App() {
         abortController.signal
       );
 
+      if (!streamCompletedNormally) {
+        // Stream completed without 'done' event (e.g. network disconnect or socket termination)
+        console.warn('Stream closed without done event, transitioning to catch-up polling');
+        startCatchUp(sessionId, now);
+        return;
+      }
+
       // Refresh sessions metadata (title preview and counts)
       const updatedList = await api.fetchSessions();
       setSessions(updatedList);
     } catch (err: unknown) {
-      if (err instanceof Error && err.name !== 'AbortError') {
-        console.error('Chat streaming failed:', err);
-        setStreamingError(err.message || 'Stream connection interrupted');
+      if (err instanceof Error && err.name === 'AbortError') {
+        // Explicitly aborted (user pressed stop or rehydrate took over)
+        return;
       }
+      // Stream interrupted, network dropped, or iOS WebKit "TypeError: Load failed"
+      console.warn('Stream interrupted, initiating server catch-up polling:', err);
+      // Suppress fatal error banner and immediately recover via server polling!
+      startCatchUp(sessionId, now);
+      return;
     } finally {
-      setIsStreaming(false);
       abortControllerRef.current = null;
+      if (streamCompletedNormally) {
+        setIsStreaming(false);
+      }
     }
   };
 
   const handleStopStreaming = () => {
+    stopPolling();
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
       abortControllerRef.current = null;
     }
     setIsStreaming(false);
+    setIsCatchingUp(false);
+  };
+
+  // Manual backup refresh handler
+  const handleRefresh = async () => {
+    if (isRefreshing) return;
+    if (typeof navigator !== 'undefined' && navigator.vibrate) {
+      try {
+        navigator.vibrate([15]);
+      } catch {}
+    }
+    setIsRefreshing(true);
+    setStreamingError(null);
+
+    const startTime = Date.now();
+    try {
+      const sessList = await api.fetchSessions();
+      setSessions(sessList);
+
+      const sessId = currentSessionId;
+      if (sessId) {
+        if (abortControllerRef.current) {
+          abortControllerRef.current.abort();
+          abortControllerRef.current = null;
+        }
+        const freshData = await api.fetchSession(sessId);
+        setMessages(freshData.messages || []);
+        checkPendingGeneration(freshData.id, freshData.messages || []);
+      }
+    } catch (err) {
+      console.error('Refresh failed:', err);
+    } finally {
+      const elapsed = Date.now() - startTime;
+      if (elapsed < 450) {
+        setTimeout(() => setIsRefreshing(false), 450 - elapsed);
+      } else {
+        setIsRefreshing(false);
+      }
+    }
   };
 
   const currentSession = sessions.find((s) => s.id === currentSessionId) || null;
@@ -457,6 +594,8 @@ export function App() {
         onToggleDrawer={() => setIsDrawerOpen(true)}
         onOpenModelModal={() => setIsModelModalOpen(true)}
         onNewSession={() => handleNewSession()}
+        onRefresh={handleRefresh}
+        isRefreshing={isRefreshing}
         currentSession={currentSession}
         modelsConfig={modelsConfig}
         activeModel={activeModel}
@@ -502,6 +641,7 @@ export function App() {
                 key={msg.id || index}
                 message={msg}
                 isStreaming={isStreaming && index === messages.length - 1}
+                isCatchingUp={isCatchingUp && index === messages.length - 1}
               />
             ))}
 
@@ -520,6 +660,7 @@ export function App() {
         onSendMessage={handleSendMessage}
         onStopStreaming={handleStopStreaming}
         isStreaming={isStreaming}
+        isCatchingUp={isCatchingUp}
         sessionId={currentSessionId}
       />
 

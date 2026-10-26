@@ -62,6 +62,36 @@ export function extractInlineThinking(raw: string): string {
   return thoughts.join('\n\n');
 }
 
+export async function copyToClipboard(text: string): Promise<boolean> {
+  if (!text) return false;
+  try {
+    if (typeof navigator !== 'undefined' && navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch (err) {
+    console.warn('navigator.clipboard.writeText failed, trying execCommand fallback:', err);
+  }
+
+  try {
+    const textArea = document.createElement('textarea');
+    textArea.value = text;
+    textArea.style.position = 'fixed';
+    textArea.style.left = '-9999px';
+    textArea.style.top = '-9999px';
+    textArea.setAttribute('readonly', '');
+    document.body.appendChild(textArea);
+    textArea.focus();
+    textArea.select();
+    const successful = document.execCommand('copy');
+    document.body.removeChild(textArea);
+    return successful;
+  } catch (fallbackErr) {
+    console.error('execCommand copy fallback failed:', fallbackErr);
+    return false;
+  }
+}
+
 export const MessageCard: React.FC<MessageCardProps> = ({
   message,
   isStreaming = false,
@@ -78,30 +108,29 @@ export const MessageCard: React.FC<MessageCardProps> = ({
   const handleCopy = async () => {
     const textToCopy = isAssistant ? cleanPromptText(message.content || '') : (message.content || '');
     if (!textToCopy) return;
-    try {
-      await navigator.clipboard.writeText(textToCopy);
-      // Trigger short haptic feedback on iOS/Android if supported
+    const ok = await copyToClipboard(textToCopy);
+    if (ok) {
       if (typeof navigator !== 'undefined' && navigator.vibrate) {
-        navigator.vibrate([20]);
+        try {
+          navigator.vibrate([20]);
+        } catch {}
       }
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
-    } catch (err) {
-      console.error('Clipboard copy failed:', err);
     }
   };
 
   const handleCopyUser = async () => {
     if (!message.content) return;
-    try {
-      await navigator.clipboard.writeText(message.content);
+    const ok = await copyToClipboard(message.content);
+    if (ok) {
       if (typeof navigator !== 'undefined' && navigator.vibrate) {
-        navigator.vibrate([15]);
+        try {
+          navigator.vibrate([15]);
+        } catch {}
       }
       setUserCopied(true);
       setTimeout(() => setUserCopied(false), 2000);
-    } catch (err) {
-      console.error('User input copy failed:', err);
     }
   };
 
@@ -121,7 +150,7 @@ export const MessageCard: React.FC<MessageCardProps> = ({
             <button
               type="button"
               onClick={handleCopyUser}
-              className={`flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium tracking-normal transition-all active:scale-95 ${
+              className={`flex items-center gap-1 px-2 py-0.5 -mr-1 rounded text-[10px] font-medium tracking-normal transition-all active:scale-95 touch-manipulation ${
                 userCopied
                   ? 'bg-zinc-800 text-zinc-200'
                   : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/60'

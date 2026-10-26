@@ -62,7 +62,7 @@ export const Header: React.FC<HeaderProps> = ({
             type="button"
             onClick={onRefresh}
             disabled={isRefreshing}
-            className="flex items-center justify-center w-10 h-10 rounded-lg text-zinc-400 hover:text-zinc-100 hover:bg-zinc-900 active:scale-95 transition-all disabled:opacity-60"
+            className="flex items-center justify-center w-10 h-10 rounded-lg text-zinc-400 hover:text-zinc-100 hover:bg-zinc-900 active:scale-95 transition-all disabled:opacity-60 touch-manipulation"
             aria-label="Refresh session"
             title="Refresh session and sync"
           >
@@ -71,7 +71,7 @@ export const Header: React.FC<HeaderProps> = ({
           <button
             type="button"
             onClick={onNewSession}
-            className="flex items-center justify-center w-10 h-10 rounded-lg text-zinc-400 hover:text-zinc-100 hover:bg-zinc-900 active:scale-95 transition-all"
+            className="flex items-center justify-center w-10 h-10 rounded-lg text-zinc-400 hover:text-zinc-100 hover:bg-zinc-900 active:scale-95 transition-all touch-manipulation"
             aria-label="Start new session"
             title="New session"
           >

@@ -104,7 +104,9 @@ export async function streamChat(
 
   if (!res.ok) {
     const errorText = await res.text();
-    throw new Error(`Chat error (${res.status}): ${errorText}`);
+    const error: any = new Error(`Chat error (${res.status}): ${errorText}`);
+    error.status = res.status;
+    throw error;
   }
 
   if (!res.body) {

@@ -339,5 +339,59 @@ class PromptForgeBackendTests(unittest.TestCase):
         self.assertEqual(msgs2[1]["content"], "A dramatic oil painting of a lighthouse during a violent sea storm")
         self.assertEqual(msgs2[1]["thinking"], "Dramatic waves crashing")
 
+    def test_20_multi_turn_catchup_flow_does_not_falsely_match_prior_turn(self):
+        # Create session
+        create_res = self.client.post("/api/sessions", json={"title": "Multi-turn Catchup Test"})
+        session_id = create_res.json()["id"]
+
+        # Turn 1: user msg + completed assistant msg
+        async def insert_turn1():
+            async with get_db() as db:
+                await db.execute(
+                    "INSERT INTO messages (id, session_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)",
+                    ("user-t1", session_id, "user", "Turn 1 prompt", 1000)
+                )
+                await db.commit()
+        asyncio.run(insert_turn1())
+        asyncio.run(save_assistant_message(session_id, "asst-t1", "Turn 1 enhanced output", 1001))
+
+        # Turn 2: user submits follow-up message at t=2000
+        turn2_time = 2000
+        async def insert_turn2_user():
+            async with get_db() as db:
+                await db.execute(
+                    "INSERT INTO messages (id, session_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)",
+                    ("user-t2", session_id, "user", "Turn 2 iteration request", turn2_time)
+                )
+                await db.commit()
+        asyncio.run(insert_turn2_user())
+
+        # While Turn 2 assistant generation is in-flight:
+        # Check that session retrieval shows the user message as last, and prior assistant msg is older than turn2_time
+        sess_pending = self.client.get(f"/api/sessions/{session_id}")
+        self.assertEqual(sess_pending.status_code, 200)
+        msgs_pending = sess_pending.json()["messages"]
+        self.assertEqual(len(msgs_pending), 3)
+        self.assertEqual(msgs_pending[-1]["role"], "user")
+        self.assertEqual(msgs_pending[-1]["content"], "Turn 2 iteration request")
+        # Ensure prior assistant message timestamp is older than turn2_time
+        asst_t1 = msgs_pending[1]
+        self.assertEqual(asst_t1["role"], "assistant")
+        self.assertLess(asst_t1["created_at"], turn2_time)
+
+        # Turn 2 completes in background
+        asyncio.run(save_assistant_message(session_id, "asst-t2", "Turn 2 completed output", 2002, "Thinking for turn 2"))
+
+        # Re-fetch session
+        sess_done = self.client.get(f"/api/sessions/{session_id}")
+        self.assertEqual(sess_done.status_code, 200)
+        msgs_done = sess_done.json()["messages"]
+        self.assertEqual(len(msgs_done), 4)
+        asst_t2 = msgs_done[-1]
+        self.assertEqual(asst_t2["role"], "assistant")
+        self.assertEqual(asst_t2["content"], "Turn 2 completed output")
+        self.assertEqual(asst_t2["thinking"], "Thinking for turn 2")
+        self.assertGreaterEqual(asst_t2["created_at"], turn2_time)
+
 if __name__ == "__main__":
     unittest.main()

@@ -55,6 +55,14 @@ export function App() {
   const currentSessionIdRef = useRef(currentSessionId);
   currentSessionIdRef.current = currentSessionId;
 
+  // Track pending generation to prevent stale assistant responses from falsely terminating catch-up
+  const pendingGenerationRef = useRef<{
+    sessionId: string;
+    userMessageId: string;
+    userMessageContent: string;
+    startedAt: number;
+  } | null>(null);
+
   const stopPolling = useCallback(() => {
     if (pollIntervalRef.current) {
       clearInterval(pollIntervalRef.current);
@@ -79,7 +87,7 @@ export function App() {
   }, []);
 
   // Start catch-up polling when stream is interrupted, disconnected, or app rehydrated
-  const startCatchUp = useCallback((sessionIdToCheck: string, expectedAfterTime?: number) => {
+  const startCatchUp = useCallback((sessionIdToCheck: string, expectedMinTime?: number) => {
     stopPolling();
     setIsCatchingUp(true);
     setIsStreaming(true);
@@ -109,20 +117,34 @@ export function App() {
     const pollInterval = 1500;
 
     const pollStep = async () => {
+      // Abort catchup if user navigated away from this session
+      if (currentSessionIdRef.current !== sessionIdToCheck) {
+        stopPolling();
+        return;
+      }
+
       attempts++;
       try {
         const freshData = await api.fetchSession(sessionIdToCheck);
+        if (currentSessionIdRef.current !== sessionIdToCheck) {
+          stopPolling();
+          return;
+        }
+
         const freshMsgs = freshData.messages || [];
         const freshLast = freshMsgs.length > 0 ? freshMsgs[freshMsgs.length - 1] : null;
 
-        // Condition for completion: assistant message is committed in SQLite
+        // Condition for completion: assistant message is committed in SQLite AND
+        // it is non-empty AND its timestamp is at or after expectedMinTime (with 5s clock tolerance)
         const isCompleted =
           freshLast &&
           freshLast.role === 'assistant' &&
-          (freshLast.content.trim().length > 0 || (expectedAfterTime ? freshLast.created_at >= expectedAfterTime : true));
+          freshLast.content.trim().length > 0 &&
+          (expectedMinTime ? freshLast.created_at >= (expectedMinTime - 5000) : true);
 
         if (isCompleted) {
           stopPolling();
+          pendingGenerationRef.current = null;
           setMessages(freshMsgs);
           setIsStreaming(false);
           setIsCatchingUp(false);
@@ -134,6 +156,7 @@ export function App() {
 
         if (attempts >= maxAttempts) {
           stopPolling();
+          pendingGenerationRef.current = null;
           setIsStreaming(false);
           setIsCatchingUp(false);
           setStreamingError('Prompt generation timed out on server. Tap refresh to check again.');
@@ -141,6 +164,7 @@ export function App() {
       } catch {
         if (attempts >= maxAttempts) {
           stopPolling();
+          pendingGenerationRef.current = null;
           setIsStreaming(false);
           setIsCatchingUp(false);
         }
@@ -157,13 +181,33 @@ export function App() {
     const lastMsg = initialMsgs && initialMsgs.length > 0 ? initialMsgs[initialMsgs.length - 1] : null;
     // If last message is from user and was submitted recently (< 150 seconds ago), poll for completion
     if (lastMsg && lastMsg.role === 'user' && (Date.now() - lastMsg.created_at) < 150000) {
+      pendingGenerationRef.current = {
+        sessionId: sessionIdToCheck,
+        userMessageId: lastMsg.id,
+        userMessageContent: lastMsg.content,
+        startedAt: lastMsg.created_at,
+      };
       startCatchUp(sessionIdToCheck, lastMsg.created_at);
+    } else {
+      stopPolling();
+      pendingGenerationRef.current = null;
+      setIsStreaming(false);
+      setIsCatchingUp(false);
     }
-  }, [startCatchUp]);
+  }, [startCatchUp, stopPolling]);
 
   // Load a session by ID
   const loadSession = useCallback(async (id: string, configFallback?: ModelsConfig | null) => {
     stopPolling();
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+    pendingGenerationRef.current = null;
+    setIsStreaming(false);
+    setIsCatchingUp(false);
+    setStreamingError(null);
+
     try {
       const data = await api.fetchSession(id);
       setCurrentSessionId(data.id);
@@ -265,20 +309,30 @@ export function App() {
         return;
       }
 
+      const pending = pendingGenerationRef.current;
+      const expectedMinTime = pending?.sessionId === sessId ? pending.startedAt : undefined;
+
       // If an active stream or catch-up was in flight when iOS backgrounded the app
-      if (abortControllerRef.current || isStreamingRef.current || isCatchingUpRef.current) {
+      if (abortControllerRef.current || isStreamingRef.current || isCatchingUpRef.current || pending) {
         try {
           const freshData = await api.fetchSession(sessId);
           const freshMsgs = freshData.messages || [];
           const freshLast = freshMsgs.length > 0 ? freshMsgs[freshMsgs.length - 1] : null;
 
-          if (freshLast && freshLast.role === 'assistant' && freshLast.content.trim().length > 0) {
+          const isCompleted =
+            freshLast &&
+            freshLast.role === 'assistant' &&
+            freshLast.content.trim().length > 0 &&
+            (expectedMinTime ? freshLast.created_at >= (expectedMinTime - 5000) : true);
+
+          if (isCompleted) {
             // Already completed in SQLite while app was backgrounded!
             if (abortControllerRef.current) {
               abortControllerRef.current.abort();
               abortControllerRef.current = null;
             }
             stopPolling();
+            pendingGenerationRef.current = null;
             setMessages(freshMsgs);
             setIsStreaming(false);
             setIsCatchingUp(false);
@@ -297,7 +351,7 @@ export function App() {
           abortControllerRef.current.abort();
           abortControllerRef.current = null;
         }
-        startCatchUp(sessId);
+        startCatchUp(sessId, expectedMinTime);
         return;
       }
 
@@ -427,6 +481,13 @@ export function App() {
       created_at: now + 1,
     };
 
+    pendingGenerationRef.current = {
+      sessionId,
+      userMessageId: userMessage.id,
+      userMessageContent: text,
+      startedAt: now,
+    };
+
     setMessages((prev) => [...prev, userMessage, pendingAssistantMessage]);
     setIsStreaming(true);
     setIsCatchingUp(false);
@@ -480,6 +541,7 @@ export function App() {
 
           if (chunk.type === 'done') {
             streamCompletedNormally = true;
+            pendingGenerationRef.current = null;
             if (chunk.id && chunk.content !== undefined) {
               setMessages((prev) => {
                 const last = prev[prev.length - 1];
@@ -512,9 +574,17 @@ export function App() {
       // Refresh sessions metadata (title preview and counts)
       const updatedList = await api.fetchSessions();
       setSessions(updatedList);
-    } catch (err: unknown) {
+    } catch (err: any) {
       if (err instanceof Error && err.name === 'AbortError') {
         // Explicitly aborted (user pressed stop or rehydrate took over)
+        return;
+      }
+      if (err?.status && err.status >= 400 && err.status < 500) {
+        // Client error (404, 400) - display fatal error rather than silent futile catch-up
+        setStreamingError(err.message || 'Request failed');
+        setIsStreaming(false);
+        setIsCatchingUp(false);
+        pendingGenerationRef.current = null;
         return;
       }
       // Stream interrupted, network dropped, or iOS WebKit "TypeError: Load failed"
@@ -525,6 +595,7 @@ export function App() {
     } finally {
       abortControllerRef.current = null;
       if (streamCompletedNormally) {
+        pendingGenerationRef.current = null;
         setIsStreaming(false);
       }
     }
@@ -536,6 +607,7 @@ export function App() {
       abortControllerRef.current.abort();
       abortControllerRef.current = null;
     }
+    pendingGenerationRef.current = null;
     setIsStreaming(false);
     setIsCatchingUp(false);
   };
@@ -556,15 +628,17 @@ export function App() {
       const sessList = await api.fetchSessions();
       setSessions(sessList);
 
-      const sessId = currentSessionId;
+      const sessId = currentSessionIdRef.current;
       if (sessId) {
         if (abortControllerRef.current) {
           abortControllerRef.current.abort();
           abortControllerRef.current = null;
         }
         const freshData = await api.fetchSession(sessId);
-        setMessages(freshData.messages || []);
-        checkPendingGeneration(freshData.id, freshData.messages || []);
+        if (currentSessionIdRef.current === sessId) {
+          setMessages(freshData.messages || []);
+          checkPendingGeneration(freshData.id, freshData.messages || []);
+        }
       }
     } catch (err) {
       console.error('Refresh failed:', err);
